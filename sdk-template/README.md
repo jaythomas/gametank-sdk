@@ -13,7 +13,12 @@
   - [How the audio firmware works](#how-the-audio-firmware-works)
   - [How firmware is built](#how-firmware-is-built)
   - [How firmware is loaded onto hardware](#how-firmware-is-loaded-onto-hardware)
-  - [Modifying wavetable waveforms](#modifying-wavetable-waveforms)
+  - [Waveforms](#waveforms)
+    - [Available slots](#available-slots)
+    - [Writing a custom waveform at runtime](#writing-a-custom-waveform-at-runtime)
+    - [Multi-timbral setup](#multi-timbral-setup)
+    - [7ch-linear differences](#7ch-linear-differences)
+    - [Changing the default (pre-loaded) waveform](#changing-the-default-pre-loaded-waveform)
   - [Modifying / adding FM instruments](#modifying--adding-fm-instruments)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
@@ -127,25 +132,19 @@ Before any audio is available `src/main/rs` invokes `AudioManager::load_firmware
 console.audio.load_firmware(FIRMWARE);
 ```
 
-1. Write `0` to `audio_freq` ($2006) to pause the ACP's sample clock.
-2. Copy the entire 4096-byte firmware image into ACP RAM at `$3000` (`self.aram.copy_from_slice(firmware)`), overwriting whatever was there - code, zero page defaults, and all.
-3. Write `0xFF` to `audio_freq` to resume the sample clock at ~14 kHz.
-
 From then on, gameplay code writes note/pitch/volume/envelope parameters
 directly into the appropriate ACP RAM offsets or via the FM firmware's
 buffered Inputs/NMI path and the ACP picks them up on its next sample tick.
 See `gametank/src/audio/mod.rs` and `gametank/src/audio/fm_4ch/mod.rs` for more details.
 
-### Modifying wavetable waveforms
+### Waveforms
 
-A wavetable is a 256-byte buffer that describes one complete oscillation cycle
-of a waveform. The ACP steps through it at a rate determined by the voice's
-frequency increment, looping continuously. Changing the shape of the buffer
-changes the timbre of every voice that uses it.
+A wavetable is a 256-byte buffer that describes one complete oscillation
+cycle of a waveform. The ACP steps through it at a rate determined by the
+voice's frequency increment, looping continuously. Changing the shape of
+the buffer changes the timbre of every voice that uses it.
 
-#### Waveform format
-
-Each byte is an **unsigned 8-bit PCM sample**:
+Each byte is an unsigned 8-bit PCM sample:
 
 | Value         | Meaning             |
 |---------------|---------------------|
@@ -153,15 +152,11 @@ Each byte is an **unsigned 8-bit PCM sample**:
 | `0x81`-`0xFF` | Positive half-cycle |
 | `0x00`-`0x7F` | Negative half-cycle |
 
-The 256 entries represent one full period. Index `0` is the start of the cycle,
-index `127` is approximately the midpoint, index `255` is the last sample before
-it wraps back to index `0`.
+The 256 entries represent one full period. Index `0` is the start
+of the cycle, index `127` is approximately the midpoint, index
+`255` is the last sample before it wraps back to index `0`.
 
 #### Available slots
-
-The firmware ships with **one pre-loaded waveform** (a sine wave) in the first
-slot — this is baked into the firmware binary at link time from
-`audiofw-src/<firmware>/wave.asm`. All remaining slots are zeroed on startup.
 
 | Firmware | Slots | Slot addresses (`WAVETABLE[n]`) |
 |----------|-------|---------------------------------|
@@ -171,10 +166,17 @@ slot — this is baked into the firmware binary at link time from
 The `WAVETABLE` constant array exported from `gametank::audio` holds the
 ACP-side address for each slot. Pass one of these to `voice.set_wavetable()`.
 
-#### Writing a custom waveform at runtime
+#### Using precompiled instruments
 
-After calling `load_firmware`, write 256 bytes into ACP RAM at the slot's ACP
-address offset using `console.audio.aram`. The slice index equals the ACP-side address:
+There are a number of pre-defined instruments in the wavetable already.
+See [gametank/instruments/README.md](./gametank/instruments/README.md)
+for instructions on how to add or modify these.
+
+#### Writing a dynamic waveform at runtime
+
+After calling `load_firmware`, write 256 bytes into ACP RAM at
+the slot's ACP address offset using `console.audio.aram`. The
+slice index equals the ACP-side address:
 
 ```rust
 use gametank::audio::{WAVETABLE, voices, MidiNote};
@@ -195,47 +197,18 @@ v[0].set_volume(63);
 v[0].set_wavetable(WAVETABLE[1]);
 ```
 
-**Do this after `load_firmware` and before the voices start playing.** Writing
-to a slot while a voice is actively reading it will produce a brief glitch as
-the ACP picks up the mid-write state.
+Do this after `load_firmware` and before the voices start playing.
+Writing to a slot while a voice is actively reading it will produce
+a brief glitch as the ACP picks up the mid-write state.
 
-#### Common waveform shapes
+See [gametank/instruments directory](gametank/instruments/README.md)
+for example static instruments to work off of. **no_std note:**
+`f32::sin` is not available directly (no standard library).
 
-All of these are drop-in replacements for the body of the example above.
-
-```rust
-// Sine wave (the firmware default, reproduced here for reference)
-let mut sine = [0u8; 256];
-for i in 0..256usize {
-    let radians = core::f32::consts::TAU * i as f32 / 256.0;
-    sine[i] = (libm::sinf(radians) * 127.0 + 128.0) as u8;
-}
-
-// Sawtooth: ramp from 0x00 to 0xFF
-let mut saw = [0u8; 256];
-for i in 0..256usize { saw[i] = i as u8; }
-
-// Triangle: ramp up then down
-let mut tri = [0u8; 256];
-for i in 0..128usize { tri[i] = (i * 2) as u8; }
-for i in 128..256usize { tri[i] = (255 - (i - 128) * 2) as u8; }
-
-// Square (50% duty cycle)
-let mut sq = [0u8; 256];
-for i in 0..128 { sq[i] = 0xFF; }
-for i in 128..256 { sq[i] = 0x00; }
-
-// Pulse (25% duty cycle - brighter, thinner)
-let mut pulse = [0u8; 256];
-for i in 0..64 { pulse[i] = 0xFF; }
-for i in 64..256 { pulse[i] = 0x00; }
-```
-
-**no_std note:** `f32::sin` is not available directly (no standard library).
-Given the CPU constraints it is better to pre-compute wavetable data on the
-host and embed it as a `const [u8; 256]`. But if necessary, there are
-`no_std`-compatible math crates such as `libm` and `micromath`. The simplest
-approach is to unroll the loops and just write them out as byte literals.
+Given the CPU constraints it is better to pre-compute wavetable data
+as noted previously, but if necessary, there are `no_std`-compatible
+math crates such as `libm` and `micromath`. Even so, it is better to
+unroll the loops into static byte if possible.
 
 #### Multi-timbral setup
 

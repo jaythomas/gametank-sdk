@@ -1,9 +1,17 @@
 use std::{env, path::Path, process::Command};
 
+mod sine_mod     { include!("instruments/sine.rs");     }
+mod saw_mod      { include!("instruments/saw.rs");      }
+mod triangle_mod { include!("instruments/triangle.rs"); }
+mod square_mod   { include!("instruments/square.rs");   }
+mod pulse_mod    { include!("instruments/pulse.rs");    }
+
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").unwrap();
     let out_dir  = env::var("OUT_DIR").unwrap();
     let fw_dir   = Path::new(&manifest).join("audiofw");
+
+    compile_instruments(&manifest);
 
     if env::var("CARGO_FEATURE_AUDIO_WAVETABLE_8CH").is_ok() {
         assemble_wavetable_firmware(
@@ -68,6 +76,7 @@ fn assemble_wavetable_firmware(
             .arg(&src)
             .arg("-o")
             .arg(&obj)
+            .current_dir(&src_dir)
             .status();
 
         match result {
@@ -111,6 +120,29 @@ fn assemble_wavetable_firmware(
         .status()
         .expect("llvm-objcopy not found. ensure the LLVM MOS SDK is on PATH");
     assert!(status.success(), "llvm-objcopy failed extracting {name} firmware binary");
+}
+
+/// Compile each instrument `.rs` into `.raw` bin files to be loaded into
+/// the firmware assembly in the next step. See: instruments/README.md
+fn compile_instruments(manifest: &str) {
+    let instruments_dir = Path::new(manifest).join("instruments");
+
+    let waveforms: &[(&str, [u8; 256])] = &[
+        ("sine",     sine_mod::wave()),
+        ("saw",      saw_mod::wave()),
+        ("triangle", triangle_mod::wave()),
+        ("square",   square_mod::wave()),
+        ("pulse",    pulse_mod::wave()),
+    ];
+
+    for (name, data) in waveforms {
+        println!(
+            "cargo:rerun-if-changed={}",
+            instruments_dir.join(format!("{name}.rs")).display()
+        );
+        std::fs::write(instruments_dir.join(format!("{name}.raw")), data)
+            .unwrap_or_else(|e| panic!("failed to write instruments/{name}.raw: {e}"));
+    }
 }
 
 /// Assemble the FM firmware using the cc65 toolchain (ca65 + ld65).

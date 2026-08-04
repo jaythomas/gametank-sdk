@@ -1,6 +1,16 @@
 .global audio_irq
 .extern vol_table
-.extern sine_table
+.extern instrument1_table
+.extern instrument2_table
+.extern instrument3_table
+.extern instrument4_table
+.extern instrument5_table
+.extern instrument6_table
+.extern instrument7_table
+.extern instrument8_table
+.extern instrument9_table
+.extern instrument10_table
+.extern instrument11_table
 .section .text
 
 ; Memory map (4KB = $0000 - $0FFF) as a Markdown table:
@@ -137,14 +147,14 @@ audio_irq:
     rti                    ; return from interrupt
 
 
-; Macro to initialize a voice (phase=0, freq=0, waveptr=sine_table, volume=0)
+; Macro to initialize a voice (phase=0, freq=0, waveptr=instrument1, volume=0)
 .macro INIT_VOICE n
     lda #0
     sta VOICE_\n\()_VOLUME
-    ; Set wavetable pointer to sine_table
-    lda #<sine_table
+    ; Set wavetable pointer to instrument1 (Rust Sequencer::init_voices overrides per-channel)
+    lda #<instrument1
     sta VOICE_\n\()_WAVEPTR_L
-    lda #>sine_table
+    lda #>instrument1
     sta VOICE_\n\()_WAVEPTR_H
 .endm
 

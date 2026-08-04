@@ -129,7 +129,7 @@ static mut PARAM_IDX: u8 = 0;
 pub fn push_param(param: u8, value: u8) {
     unsafe {
         let idx = PARAM_IDX as usize;
-        aram_write(INPUTS + idx,     param);
+        aram_write(INPUTS + idx, param);
         aram_write(INPUTS + idx + 1, value);
         PARAM_IDX += 2;
     }
@@ -156,12 +156,12 @@ pub fn flush_params() {
 // Per-operator envelope state (mirrors music.c globals)
 // ---------------------------------------------------------------------------
 
-static mut AUDIO_AMPLITUDES: [u8; NUM_OPS]  = [0; NUM_OPS];
-static mut ENV_INITIAL:       [u8; NUM_OPS]  = [0; NUM_OPS];
-static mut ENV_DECAY:         [u8; NUM_OPS]  = [0; NUM_OPS];
-static mut ENV_SUSTAIN:       [u8; NUM_OPS]  = [0; NUM_OPS];
-static mut OP_TRANSPOSE:      [u8; NUM_OPS]  = [0; NUM_OPS];
-static mut CH_NOTE_OFFSET:    [i8; NUM_CHANNELS] = [0; NUM_CHANNELS];
+static mut AUDIO_AMPLITUDES: [u8; NUM_OPS] = [0; NUM_OPS];
+static mut ENV_INITIAL: [u8; NUM_OPS] = [0; NUM_OPS];
+static mut ENV_DECAY: [u8; NUM_OPS] = [0; NUM_OPS];
+static mut ENV_SUSTAIN: [u8; NUM_OPS] = [0; NUM_OPS];
+static mut OP_TRANSPOSE: [u8; NUM_OPS] = [0; NUM_OPS];
+static mut CH_NOTE_OFFSET: [i8; NUM_CHANNELS] = [0; NUM_CHANNELS];
 
 /// Per-channel "note held" flag, mirroring the C SDK's `note_held_mask`.
 ///
@@ -202,9 +202,9 @@ impl Channel {
 
             let op_base = ch * OPS_PER_CHANNEL;
             for i in 0..OPS_PER_CHANNEL {
-                ENV_INITIAL [op_base + i] = instr.env_initial [i];
-                ENV_DECAY   [op_base + i] = instr.env_decay   [i];
-                ENV_SUSTAIN [op_base + i] = instr.env_sustain [i];
+                ENV_INITIAL[op_base + i] = instr.env_initial[i];
+                ENV_DECAY[op_base + i] = instr.env_decay[i];
+                ENV_SUSTAIN[op_base + i] = instr.env_sustain[i];
                 OP_TRANSPOSE[op_base + i] = instr.op_transpose[i];
             }
         }
@@ -249,15 +249,14 @@ impl Channel {
     ///
     /// Mirrors `set_note(ch, n)` in `music.c`.
     pub fn set_note(&mut self, note: MidiNote) {
-        let base_note = (note as u8 as i16 + unsafe { CH_NOTE_OFFSET[self.idx] } as i16)
-            .clamp(0, 107) as u8;
+        let base_note =
+            (note as u8 as i16 + unsafe { CH_NOTE_OFFSET[self.idx] } as i16).clamp(0, 107) as u8;
         let op_base = self.idx * OPS_PER_CHANNEL;
 
         for i in 0..OPS_PER_CHANNEL {
             let op = op_base + i;
-            let transposed = (base_note as i16
-                + unsafe { OP_TRANSPOSE[op] } as i16)
-                .clamp(0, 107) as usize;
+            let transposed =
+                (base_note as i16 + unsafe { OP_TRANSPOSE[op] } as i16).clamp(0, 107) as usize;
             let idx = transposed * 2;
             push_param((PITCH_MSB + op) as u8, PITCH_TABLE[idx]);
             push_param((PITCH_LSB + op) as u8, PITCH_TABLE[idx + 1]);
@@ -278,9 +277,9 @@ impl Channel {
         unsafe {
             for i in 0..OPS_PER_CHANNEL {
                 let op = op_base + i;
-                let amp  = &mut AUDIO_AMPLITUDES[op];
-                let sus  = ENV_SUSTAIN[op];
-                let dec  = ENV_DECAY[op];
+                let amp = &mut AUDIO_AMPLITUDES[op];
+                let sus = ENV_SUSTAIN[op];
+                let dec = ENV_DECAY[op];
 
                 // C SDK: if ((sustain - amp) ^ decay) & 0x80 → decay still needed
                 if ((sus.wrapping_sub(*amp)) ^ dec) & 0x80 != 0 {

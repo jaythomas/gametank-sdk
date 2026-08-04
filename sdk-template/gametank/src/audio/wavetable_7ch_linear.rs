@@ -52,7 +52,7 @@
 //! console.audio[0x600..0x700].copy_from_slice(&my_wave);
 //! ```
 
-use crate::audio::pitch_table::{midi_inc, MidiNote};
+use crate::audio::pitch_table::{MidiNote, midi_inc};
 
 /// Base address for voice registers (CPU-side address, ACP RAM at 0x3000)
 pub const VOICE_BASE: usize = 0x3041;
@@ -69,34 +69,28 @@ pub const WAVETABLE_SIZE: usize = 256;
 pub const WAVETABLE_COUNT: usize = 6;
 
 /// Wavetable slot addresses (ACP-side, for setting voice wavetable pointer)
-pub const WAVETABLE: [u16; WAVETABLE_COUNT] = [
-    0x0600, 0x0700, 0x0800, 0x0900, 0x0A00, 0x0B00,
-];
+pub const WAVETABLE: [u16; WAVETABLE_COUNT] = [0x0600, 0x0700, 0x0800, 0x0900, 0x0A00, 0x0B00];
 
 /// Volume level mapping to table pointer + shift
 /// Each entry: (volume_table_ptr, shift_count)
 /// 16 linear levels sorted by shift (most impact) then table
 const VOLUME_MAP: [(u16, u8); 17] = [
     (0x0500, 4), // 0: silence (shift >= 4 gives silence)
-    
     // Shift 3 (divide by 8) - quietest audible levels
     (0x0500, 3), // 1: table 3 (62.5%), shift 3
     (0x0400, 3), // 2: table 2 (75%), shift 3
     (0x0300, 3), // 3: table 1 (87.5%), shift 3
     (0x0200, 3), // 4: table 0 (100%), shift 3
-    
     // Shift 2 (divide by 4)
     (0x0500, 2), // 5: table 3 (62.5%), shift 2
     (0x0400, 2), // 6: table 2 (75%), shift 2
     (0x0300, 2), // 7: table 1 (87.5%), shift 2
     (0x0200, 2), // 8: table 0 (100%), shift 2
-    
     // Shift 1 (divide by 2)
     (0x0500, 1), // 9: table 3 (62.5%), shift 1
     (0x0400, 1), // 10: table 2 (75%), shift 1
     (0x0300, 1), // 11: table 1 (87.5%), shift 1
     (0x0200, 1), // 12: table 0 (100%), shift 1
-    
     // Shift 0 (no division) - loudest levels
     (0x0500, 0), // 13: table 3 (62.5%), shift 0
     (0x0400, 0), // 14: table 2 (75%), shift 0
@@ -130,7 +124,7 @@ impl Voice {
     }
 
     /// Set the voice frequency directly as a 16-bit increment value.
-    /// 
+    ///
     /// Use `pitch_table::midi_inc()` to convert from MIDI notes,
     /// or calculate directly: `inc = (freq_hz * 65536) / SAMPLE_RATE`
     #[inline]
@@ -139,7 +133,7 @@ impl Voice {
     }
 
     /// Set the volume level (0 = silence, 16 = maximum).
-    /// 
+    ///
     /// This firmware provides 16 linear volume steps using 4 volume tables
     /// combined with 4 shift levels.
     #[inline]
@@ -151,7 +145,7 @@ impl Voice {
     }
 
     /// Set which wavetable this voice uses.
-    /// 
+    ///
     /// Pass the ACP-side address (e.g., `WAVETABLE[0]` = 0x0600).
     #[inline]
     pub fn set_wavetable(&mut self, wavetable_addr: u16) {
@@ -174,7 +168,8 @@ impl Voice {
     #[inline]
     pub fn get_volume(&self) -> u8 {
         // Reverse lookup in VOLUME_MAP
-        VOLUME_MAP.iter()
+        VOLUME_MAP
+            .iter()
             .position(|(ptr, shift)| *ptr == self.volptr && *shift == self.shift)
             .unwrap_or(0) as u8
     }

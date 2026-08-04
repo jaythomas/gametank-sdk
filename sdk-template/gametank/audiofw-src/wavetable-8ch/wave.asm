@@ -1,25 +1,56 @@
 .section .const.wavetables, "a"
 .align 256
-.global sine_table
-sine_table:
+.global instrument1_table
+instrument1_table:
     .incbin "../../instruments/sine.raw"
 
 .align 256
-.global saw_table
-saw_table:
+.global instrument2_table
+instrument2_table:
     .incbin "../../instruments/saw.raw"
 
 .align 256
-.global tri_table
-tri_table:
+.global instrument3_table
+instrument3_table:
     .incbin "../../instruments/triangle.raw"
 
 .align 256
-.global square_table
-square_table:
+.global instaument4_table
+instrument4_table:
     .incbin "../../instruments/square.raw"
 
 .align 256
-.global pulse_table
-pulse_table:
+.global instaument5_table
+instrument5_table:
     .incbin "../../instruments/pulse.raw"
+
+.align 256
+.global instrument6_table
+instrument6_table:
+    .incbin "../../instruments/sine.raw"
+
+.align 256
+.global instrument7_table
+instrument7_table:
+    .incbin "../../instruments/sine.raw"
+
+.align 256
+.global instrument8_table
+instrument8_table:
+    .incbin "../../instruments/sine.raw"
+
+.align 256
+.global instrument9_table
+instrument9_table:
+    .incbin "../../instruments/sine.raw"
+
+.align 256
+.global instrument10_table
+instrument10_table:
+    .incbin "../../instruments/sine.raw"
+
+.align 256
+.global instrument11_table
+instrument11_table:
+    .incbin "../../instruments/sine.raw"
+

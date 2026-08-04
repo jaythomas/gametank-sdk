@@ -118,7 +118,11 @@ fn assemble_asm_lib(manifest_dir: &str, out_dir: &str) {
             .arg(&obj)
             .status()
             .expect("mos-clang not found; ensure the LLVM MOS SDK is on PATH");
-        assert!(status.success(), "mos-clang failed assembling {}", src.display());
+        assert!(
+            status.success(),
+            "mos-clang failed assembling {}",
+            src.display()
+        );
 
         obj_paths.push(obj);
     }

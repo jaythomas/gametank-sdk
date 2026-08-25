@@ -27,6 +27,7 @@ pub enum SequencerCmd {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChannelCmd {
     Note(String),
+    NoteOff,
     Phase(u16),
     SlidePitch(u8, i16),
     SlideVol(u8, i16),

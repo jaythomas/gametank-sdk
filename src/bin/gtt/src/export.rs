@@ -38,15 +38,21 @@ fn bake_pattern(
 
     for ch in 0..CHANNELS {
         let mut cur_freq: u16 = 0;
-        let mut cur_vol: u8 = VOL_NO_CHANGE;
+        let mut remembered_vol: u8 = 0;
+        let mut muted = false;
 
         for beat in 0..BEATS {
             let row = &pattern[ch + 1][beat];
+
+            let mut explicit_vol: Option<u8> = None;
+            let mut has_note = false;
+            let mut has_note_off = false;
 
             // Process ChannelCmds
             for cmd in &row.cmd_list {
                 match cmd {
                     ChannelCmd::Note(name) => {
+                        has_note = true;
                         if let Some(&hz) = file.tuning.notes.get(name.as_str()) {
                             cur_freq = note_to_freq_inc(hz, sample_rate_hz);
                         }
@@ -55,7 +61,10 @@ fn bake_pattern(
                         cur_freq = *inc;
                     }
                     ChannelCmd::Volume(v) => {
-                        cur_vol = (*v).min(63);
+                        explicit_vol = Some((*v).min(63));
+                    }
+                    ChannelCmd::NoteOff => {
+                        has_note_off = true;
                     }
                     _ => {}
                 }
@@ -78,11 +87,25 @@ fn bake_pattern(
                 }
             }
 
+            let vol_out = if let Some(v) = explicit_vol {
+                remembered_vol = v;
+                muted = false;
+                v
+            } else if has_note_off {
+                muted = true;
+                0
+            } else if has_note && muted {
+                muted = false;
+                remembered_vol
+            } else {
+                VOL_NO_CHANGE
+            };
+
             // 0xFF vol = no change
             let base = ch * CHANNEL_STRIDE;
             out[base + beat] = (cur_freq & 0xFF) as u8;
             out[base + BEATS + beat] = (cur_freq >> 8) as u8;
-            out[base + BEATS * 2 + beat] = cur_vol;
+            out[base + BEATS * 2 + beat] = vol_out;
         }
     }
 

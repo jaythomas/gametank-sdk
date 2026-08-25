@@ -52,12 +52,12 @@ BEAT  SEQ  ch0 v ::↗↘   ch1 v ::↗↘   ...
 The total set of beats on screen represents a **pattern**.
 The number of beats in the pattern can be adjusted on the control deck or via the command palette `:beats [1-255]`.
 
-Use the top row of keys and numbers for note entry.
+To enter notes, select the column with the channel number (ie ch0) and use the top row of letters and numbers for note entry.
 The default tuning is mapped similar to a piano roll.
 This is QWERTY-agnostic, but assuming your keyboard is QWERTY-based, the key binding would work like this:
 
 ```
- NOTE OFF
+ Note OFF
  ┊     C♯5 D♯5     F♯5 G♯5 A♯5     C♯6 D♯6     F#6
  ┊   C5┊ D5┊ E5  F5┊ G5┊ A5┊ B5  C6┊ D6┊ E6  F6┊ G6
  ~   │ ┊ │ ┊ │   │ ┊ │ ┊ │ ┊ │   │ ┊ │ ┊ │   │ ┊ │
@@ -68,6 +68,10 @@ This is QWERTY-agnostic, but assuming your keyboard is QWERTY-based, the key bin
 See the [Tuning editor](#tuning-editor) for how to update these mappings.
 
 **Delete** key removes the note/command the cursor has selected.
+
+**`/~** sets Note OFF. While an empty beat carries a note, an explicit Note OFF effectively ends the note by temporarily muting the channel.
+
+**v** represents volume. Enter a value between 0 and 63 to change the volume for the channel. The last set volume carries to the next note, even if a note OFF is set along the way.
 
 
 ## Control deck

@@ -19,6 +19,17 @@ use crate::{
     tracker::{Beat, ChannelCmd, Pattern},
 };
 
+mod keybinds {
+    use ratatui::crossterm::event::KeyCode;
+
+    pub const NOTE_OFF: [KeyCode; 2] = [KeyCode::Char('`'), KeyCode::Char('~')];
+
+    pub const CLEAR: [KeyCode; 2] = [KeyCode::Backspace, KeyCode::Delete];
+
+    pub const VOL_INCREMENT: KeyCode = KeyCode::Char('=');
+    pub const VOL_DECREMENT: KeyCode = KeyCode::Char('-');
+}
+
 #[derive(Default, Clone, Copy)]
 struct ViewLayout {
     outer: Rect,
@@ -35,6 +46,7 @@ pub struct PatternEditor {
     view_layout: ViewLayout,
     lanes: Vec<Lane>,
     transpose: i32,
+    vol_edit: Option<(u8, u8)>,
 }
 
 impl PatternEditor {
@@ -74,6 +86,7 @@ impl PatternEditor {
             transpose: 0,
             sel_x: 2,
             sel_y: 0,
+            vol_edit: None,
         }
     }
 
@@ -103,10 +116,11 @@ impl PatternEditor {
             LaneKind::Note => {
                 let b = Self::get_channel_beat(lane.ch, beat, pattern);
                 let note = b.cmd_list.iter().find_map(|c| match c {
-                    ChannelCmd::Note(s) => Some(s.clone()),
+                    ChannelCmd::Note(s) => Some(NoteCell::On(s.clone())),
+                    ChannelCmd::NoteOff => Some(NoteCell::Off),
                     _ => None,
                 });
-                CellDisplay::Note(note)
+                CellDisplay::Note(note.unwrap_or(NoteCell::Empty))
             }
             LaneKind::Vol => {
                 let b = Self::get_channel_beat(lane.ch, beat, pattern);
@@ -121,7 +135,12 @@ impl PatternEditor {
                 let n = b
                     .cmd_list
                     .iter()
-                    .filter(|c| !matches!(c, ChannelCmd::Note(_) | ChannelCmd::Volume(_)))
+                    .filter(|c| {
+                        !matches!(
+                            c,
+                            ChannelCmd::Note(_) | ChannelCmd::NoteOff | ChannelCmd::Volume(_)
+                        )
+                    })
                     .count()
                     .min(0xF) as u8;
                 CellDisplay::Fx(n)
@@ -142,9 +161,15 @@ pub enum CellStyle {
 pub enum CellDisplay {
     BeatNum(u8),
     SeqCmds(usize),
-    Note(Option<String>),
+    Note(NoteCell),
     Vol(Option<u8>),
     Fx(u8),
+}
+
+pub enum NoteCell {
+    Empty,
+    Off,
+    On(String),
 }
 
 impl CellDisplay {
@@ -155,12 +180,13 @@ impl CellDisplay {
                 0 => "---".to_string(),
                 n => format!("[{:1x}]", n),
             },
-            CellDisplay::Note(maybe_note) => match maybe_note {
-                None => "---".to_string(),
-                Some(s) => format!("{:<3}", s),
+            CellDisplay::Note(cell) => match cell {
+                NoteCell::Empty => "---".to_string(),
+                NoteCell::Off => "OFF".to_string(),
+                NoteCell::On(s) => format!("{:<3}", s),
             },
             CellDisplay::Vol(maybe_set) => match maybe_set {
-                Some(v) => format!("{:02x}", v),
+                Some(v) => format!("{:02}", v),
                 None => "--".to_string(),
             },
             CellDisplay::Fx(n) => match n {
@@ -180,10 +206,11 @@ impl CellDisplay {
                 SCHEME.reduced_text_color(SCHEME.white[1]),
                 Modifier::empty(),
             ),
-            CellDisplay::Note(maybe_note) => (
-                match maybe_note {
-                    None => SCHEME.gray[1],
-                    Some(_) => SCHEME.orange[1],
+            CellDisplay::Note(cell) => (
+                match cell {
+                    NoteCell::Empty => SCHEME.gray[1],
+                    NoteCell::Off => SCHEME.red[1],
+                    NoteCell::On(_) => SCHEME.orange[1],
                 },
                 Modifier::empty(),
             ),
@@ -262,9 +289,11 @@ impl Component for PatternEditor {
             match code {
                 KeyCode::Up => {
                     self.sel_y = if self.sel_y == 0 { 63 } else { self.sel_y - 1 };
+                    self.vol_edit = None;
                 }
                 KeyCode::Down => {
                     self.sel_y = if self.sel_y == 63 { 0 } else { self.sel_y + 1 };
+                    self.vol_edit = None;
                 }
                 KeyCode::Left => {
                     self.sel_x = if self.sel_x == 0 {
@@ -272,17 +301,21 @@ impl Component for PatternEditor {
                     } else {
                         self.sel_x - 1
                     };
+                    self.vol_edit = None;
                 }
                 KeyCode::Right => {
                     self.sel_x = (self.sel_x + 1) % self.lanes.len() as u8;
+                    self.vol_edit = None;
                 }
                 KeyCode::PageUp => {
                     let step = (self.view_layout.page_h / 2).max(1) as u8;
                     self.sel_y = self.sel_y.saturating_sub(step);
+                    self.vol_edit = None;
                 }
                 KeyCode::PageDown => {
                     let step = (self.view_layout.page_h / 2).max(1) as u8;
                     self.sel_y = (self.sel_y + step).min(63);
+                    self.vol_edit = None;
                 }
                 _ => {}
             }
@@ -296,6 +329,30 @@ impl Component for PatternEditor {
             let shift = self.transpose * scale_size as i32;
             for event in &events {
                 match event {
+                    Event::Key(KeyEvent {
+                        code,
+                        kind: KeyEventKind::Press,
+                        ..
+                    }) if keybinds::NOTE_OFF.contains(code) => {
+                        let row = self.sel_y as usize;
+                        let pattern = file.current_pattern_mut(self.pattern_idx);
+                        let beat = &mut pattern[channel + 1][row];
+                        beat.cmd_list
+                            .retain(|c| !matches!(c, ChannelCmd::Note(_) | ChannelCmd::NoteOff));
+                        beat.cmd_list.push(ChannelCmd::NoteOff);
+                        self.sel_y = (self.sel_y + 1) % 64;
+                    }
+                    Event::Key(KeyEvent {
+                        code,
+                        kind: KeyEventKind::Press,
+                        ..
+                    }) if keybinds::CLEAR.contains(code) => {
+                        let row = self.sel_y as usize;
+                        let pattern = file.current_pattern_mut(self.pattern_idx);
+                        let beat = &mut pattern[channel + 1][row];
+                        beat.cmd_list
+                            .retain(|c| !matches!(c, ChannelCmd::Note(_) | ChannelCmd::NoteOff));
+                    }
                     Event::Key(KeyEvent {
                         code: KeyCode::Char(c),
                         kind: KeyEventKind::Press,
@@ -318,29 +375,107 @@ impl Component for PatternEditor {
                                     let row = self.sel_y as usize;
                                     let pattern = file.current_pattern_mut(self.pattern_idx);
                                     let beat = &mut pattern[channel + 1][row];
-                                    beat.cmd_list.retain(|c| !matches!(c, ChannelCmd::Note(_)));
+                                    beat.cmd_list.retain(|c| {
+                                        !matches!(c, ChannelCmd::Note(_) | ChannelCmd::NoteOff)
+                                    });
                                     beat.cmd_list.push(ChannelCmd::Note(transposed));
-                                    if !beat
-                                        .cmd_list
-                                        .iter()
-                                        .any(|c| matches!(c, ChannelCmd::Volume(_)))
-                                    {
-                                        beat.cmd_list.push(ChannelCmd::Volume(18));
-                                    }
                                     self.sel_y = (self.sel_y + 1) % 64;
                                 }
                             }
                         }
                     }
+                    _ => {}
+                }
+            }
+        }
+
+        if let (LaneKind::Vol, Some(channel)) = (lane_kind, ch) {
+            let cell = (self.sel_x, self.sel_y);
+            let row = self.sel_y as usize;
+            for event in &events {
+                match event {
                     Event::Key(KeyEvent {
-                        code: KeyCode::Delete | KeyCode::Backspace,
+                        code: KeyCode::Char(c),
                         kind: KeyEventKind::Press,
+                        modifiers,
                         ..
-                    }) => {
-                        let row = self.sel_y as usize;
+                    }) if matches!(*modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+                        && c.is_ascii_digit() =>
+                    {
+                        let digit = c.to_digit(10).unwrap() as u8;
+                        let prev = if self.vol_edit == Some(cell) {
+                            let pattern = file.current_pattern(self.pattern_idx);
+                            pattern[channel + 1][row]
+                                .cmd_list
+                                .iter()
+                                .find_map(|c| match c {
+                                    ChannelCmd::Volume(v) => Some(*v),
+                                    _ => None,
+                                })
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        let value = ((prev % 10) * 10 + digit).min(63);
+                        self.vol_edit = Some(cell);
+
                         let pattern = file.current_pattern_mut(self.pattern_idx);
                         let beat = &mut pattern[channel + 1][row];
-                        beat.cmd_list.retain(|c| !matches!(c, ChannelCmd::Note(_)));
+                        beat.cmd_list
+                            .retain(|c| !matches!(c, ChannelCmd::Volume(_)));
+                        beat.cmd_list.push(ChannelCmd::Volume(value));
+                    }
+                    Event::Key(KeyEvent {
+                        code,
+                        kind: KeyEventKind::Press,
+                        modifiers,
+                        ..
+                    }) if matches!(*modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+                        && (*code == keybinds::VOL_INCREMENT
+                            || *code == keybinds::VOL_DECREMENT) =>
+                    {
+                        self.vol_edit = None;
+                        let pattern = file.current_pattern(self.pattern_idx);
+                        let current =
+                            pattern[channel + 1][row]
+                                .cmd_list
+                                .iter()
+                                .find_map(|cmd| match cmd {
+                                    ChannelCmd::Volume(v) => Some(*v),
+                                    _ => None,
+                                });
+
+                        let next_value = if *code == keybinds::VOL_INCREMENT {
+                            match current {
+                                None => Some(0),
+                                Some(v) if v < 63 => Some(v + 1),
+                                Some(_) => None,
+                            }
+                        } else {
+                            match current {
+                                Some(v) if v > 0 => Some(v - 1),
+                                _ => None,
+                            }
+                        };
+
+                        if let Some(value) = next_value {
+                            let pattern = file.current_pattern_mut(self.pattern_idx);
+                            let beat = &mut pattern[channel + 1][row];
+                            beat.cmd_list
+                                .retain(|c| !matches!(c, ChannelCmd::Volume(_)));
+                            beat.cmd_list.push(ChannelCmd::Volume(value));
+                        }
+                    }
+                    Event::Key(KeyEvent {
+                        code,
+                        kind: KeyEventKind::Press,
+                        ..
+                    }) if keybinds::CLEAR.contains(code) => {
+                        self.vol_edit = None;
+                        let pattern = file.current_pattern_mut(self.pattern_idx);
+                        let beat = &mut pattern[channel + 1][row];
+                        beat.cmd_list
+                            .retain(|c| !matches!(c, ChannelCmd::Volume(_)));
                     }
                     _ => {}
                 }

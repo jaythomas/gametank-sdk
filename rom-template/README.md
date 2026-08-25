@@ -105,7 +105,7 @@ fn main(console: &mut Console) {
     sequencer.init_voices();
 
     loop {
-        unsafe { wait(); }
+        unsafe { wait_vblank(); }
         console.flip_framebuffers();
         sequencer.tick();  // called every frame
     }

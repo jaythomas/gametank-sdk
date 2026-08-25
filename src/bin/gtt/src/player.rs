@@ -50,6 +50,8 @@ struct PlayerInner {
     samples_per_beat: f64,
     samples_until_next_beat: f64,
     output_channels: usize,
+    remembered_vol: [u8; AUDIO_CHANNELS],
+    muted: [bool; AUDIO_CHANNELS],
 }
 
 impl PlayerInner {
@@ -97,6 +99,8 @@ impl PlayerInner {
             samples_per_beat,
             samples_until_next_beat: samples_per_beat,
             output_channels,
+            remembered_vol: [0; AUDIO_CHANNELS],
+            muted: [false; AUDIO_CHANNELS],
         }
     }
 
@@ -191,21 +195,37 @@ impl PlayerInner {
         for ch in 0..AUDIO_CHANNELS {
             let beat = &self.pattern[ch + 1][row];
             let maybe_note = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::Note(s) => Some(s.as_str()),
+                ChannelCmd::Note(s) => Some(s.clone()),
                 _ => None,
             });
             let maybe_vol = beat.cmd_list.iter().find_map(|c| match c {
                 ChannelCmd::Volume(v) => Some(*v),
                 _ => None,
             });
+            let note_off = beat
+                .cmd_list
+                .iter()
+                .any(|c| matches!(c, ChannelCmd::NoteOff));
+
+            if let Some(v) = maybe_vol {
+                self.remembered_vol[ch] = v;
+                self.muted[ch] = false;
+                self.set_voice_volume(ch, v);
+            } else if note_off {
+                self.muted[ch] = true;
+                self.set_voice_volume(ch, 0);
+            }
+
             if let Some(note_name) = maybe_note {
-                if let Some(&freq_hz) = self.tuning_notes.get(note_name) {
+                if let Some(&freq_hz) = self.tuning_notes.get(note_name.as_str()) {
                     let freq_u32 = ((freq_hz / self.acp_sample_rate) * 65536.0).round() as u32;
                     let freq = freq_u32.min(0xFFFF) as u16;
                     self.set_voice_frequency(ch, freq);
                     self.set_voice_waveptr(ch, ch);
-                    let vol = maybe_vol.unwrap_or(32);
-                    self.set_voice_volume(ch, vol);
+                    if maybe_vol.is_none() && self.muted[ch] {
+                        self.muted[ch] = false;
+                        self.set_voice_volume(ch, self.remembered_vol[ch]);
+                    }
                 }
             }
         }

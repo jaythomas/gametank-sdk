@@ -20,7 +20,7 @@ use crate::{
     component::Component,
     file::{NUM_INSTRUMENTS, TrackerFile},
     scheme::SCHEME,
-    tracker::PATTERN_TABLE_WIDTH,
+    tracker::{PATTERN_BEATS, PATTERN_TABLE_WIDTH},
 };
 
 const BTN_W: u16 = 3;
@@ -49,6 +49,7 @@ const SAMPLE_RATE_LABELS: [&str; 5] = ["14kHz", "16kHz", "22kHz", "32kHz", "44kH
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Row {
     Bpm,
+    FxSpeed,
     Beats,
     Trans,
     SampleRate,
@@ -63,7 +64,7 @@ enum Row {
 
 impl Row {
     fn is_setting(self) -> bool {
-        matches!(self, Row::Bpm | Row::Beats | Row::Trans)
+        matches!(self, Row::Bpm | Row::FxSpeed | Row::Beats | Row::Trans)
     }
 
     fn is_action(self) -> bool {
@@ -80,10 +81,11 @@ impl Row {
 
     fn label(self) -> &'static str {
         match self {
-            Row::Bpm => "BPM:  ",
-            Row::Beats => "Beats: ",
-            Row::Trans => "Trans: ",
-            Row::SampleRate => "Rate:  ",
+            Row::Bpm => "BPM:     ",
+            Row::FxSpeed => "FxSpeed: ",
+            Row::Beats => "Beats:   ",
+            Row::Trans => "Trans:   ",
+            Row::SampleRate => "Rate:    ",
             Row::Instrument(_)
             | Row::ActionPlay
             | Row::ActionNewOpen
@@ -97,6 +99,7 @@ impl Row {
     fn range(self) -> (u16, u16) {
         match self {
             Row::Bpm => (1, 399),
+            Row::FxSpeed => (1, 31),
             Row::Beats => (0, 255),
             Row::Trans
             | Row::SampleRate
@@ -163,7 +166,7 @@ impl Col {
 
 fn default_col(row: Row) -> Col {
     match row {
-        Row::Bpm | Row::Beats | Row::Trans | Row::SampleRate => Col::Input,
+        Row::Bpm | Row::FxSpeed | Row::Beats | Row::Trans | Row::SampleRate => Col::Input,
         Row::Instrument(_)
         | Row::ActionPlay
         | Row::ActionNewOpen
@@ -185,6 +188,10 @@ pub struct ControlDeck {
     bpm_minus: ButtonState,
     bpm_plus: ButtonState,
     bpm_snapshot: String,
+    fxspeed_input: TextInputState,
+    fxspeed_minus: ButtonState,
+    fxspeed_plus: ButtonState,
+    fxspeed_snapshot: String,
     editing: bool,
     instruments: [InstrumentEntry; NUM_INSTRUMENTS],
     pub playing: bool,
@@ -211,6 +218,8 @@ impl ControlDeck {
     pub fn init() -> Self {
         let mut bpm_input = TextInputState::new();
         bpm_input.set_value("120");
+        let mut fxspeed_input = TextInputState::new();
+        fxspeed_input.set_value("6");
         let mut rows_input = TextInputState::new();
         rows_input.set_value("64");
         let mut trans_input = TextInputState::new();
@@ -223,6 +232,10 @@ impl ControlDeck {
             bpm_snapshot: "120".to_string(),
             bpm_plus: ButtonState::new(),
             bpm_minus: ButtonState::new(),
+            fxspeed_input,
+            fxspeed_snapshot: "6".to_string(),
+            fxspeed_plus: ButtonState::new(),
+            fxspeed_minus: ButtonState::new(),
             rows_input,
             rows_snapshot: "64".to_string(),
             rows_plus: ButtonState::new(),
@@ -290,6 +303,9 @@ impl ControlDeck {
         self.bpm_input.focus.set(false);
         self.bpm_plus.focus.set(false);
         self.bpm_minus.focus.set(false);
+        self.fxspeed_input.focus.set(false);
+        self.fxspeed_plus.focus.set(false);
+        self.fxspeed_minus.focus.set(false);
         self.rows_input.focus.set(false);
         self.rows_plus.focus.set(false);
         self.rows_minus.focus.set(false);
@@ -309,12 +325,46 @@ impl ControlDeck {
         self.action_export_btn.focus.set(false);
     }
 
-    pub fn get_bpm(&self) -> f64 {
+    pub fn get_bpm(&self) -> u16 {
+        let (min, max) = Row::Bpm.range();
         self.bpm_input
             .value::<String>()
-            .parse::<f64>()
-            .unwrap_or(120.0)
-            .max(1.0)
+            .parse::<u16>()
+            .unwrap_or(min)
+            .clamp(min, max)
+    }
+
+    pub fn set_bpm(&mut self, bpm: u16) {
+        let (min, max) = Row::Bpm.range();
+        let clamped = bpm.clamp(min, max);
+        let s = clamped.to_string();
+        self.bpm_input.set_value(s.clone());
+        self.bpm_snapshot = s;
+    }
+
+    pub fn get_fxspeed(&self) -> u8 {
+        let (min, max) = Row::FxSpeed.range();
+        self.fxspeed_input
+            .value::<String>()
+            .parse::<u16>()
+            .unwrap_or(min)
+            .clamp(min, max) as u8
+    }
+
+    pub fn set_fxspeed(&mut self, speed: u8) {
+        let (min, max) = Row::FxSpeed.range();
+        let clamped = (speed as u16).clamp(min, max);
+        let s = clamped.to_string();
+        self.fxspeed_input.set_value(s.clone());
+        self.fxspeed_snapshot = s;
+    }
+
+    pub fn get_beats(&self) -> u8 {
+        self.rows_input
+            .value::<String>()
+            .parse::<u16>()
+            .unwrap_or(PATTERN_BEATS as u16)
+            .clamp(1, PATTERN_BEATS as u16) as u8
     }
 
     pub fn mark_export_success(&mut self) {
@@ -366,6 +416,15 @@ impl ControlDeck {
         self.bpm_minus
             .focus
             .set(row == Row::Bpm && col == Col::Minus);
+        self.fxspeed_input
+            .focus
+            .set(row == Row::FxSpeed && col == Col::Input && editing);
+        self.fxspeed_plus
+            .focus
+            .set(row == Row::FxSpeed && col == Col::Plus);
+        self.fxspeed_minus
+            .focus
+            .set(row == Row::FxSpeed && col == Col::Minus);
         self.rows_input
             .focus
             .set(row == Row::Beats && col == Col::Input && editing);
@@ -409,6 +468,7 @@ impl ControlDeck {
     fn current_input_mut(&mut self) -> &mut TextInputState {
         match self.selected_row {
             Row::Bpm => &mut self.bpm_input,
+            Row::FxSpeed => &mut self.fxspeed_input,
             Row::Beats => &mut self.rows_input,
             Row::Trans => &mut self.trans_input,
             Row::Instrument(i) => &mut self.instruments[i].name_input,
@@ -427,6 +487,7 @@ impl ControlDeck {
     fn take_snapshot(&mut self) {
         match self.selected_row {
             Row::Bpm => self.bpm_snapshot = self.bpm_input.value::<String>(),
+            Row::FxSpeed => self.fxspeed_snapshot = self.fxspeed_input.value::<String>(),
             Row::Beats => self.rows_snapshot = self.rows_input.value::<String>(),
             Row::Trans => self.trans_snapshot = self.trans_input.value::<String>(),
             Row::Instrument(i) => {
@@ -448,6 +509,10 @@ impl ControlDeck {
             Row::Bpm => {
                 let s = self.bpm_snapshot.clone();
                 self.bpm_input.set_value(s);
+            }
+            Row::FxSpeed => {
+                let s = self.fxspeed_snapshot.clone();
+                self.fxspeed_input.set_value(s);
             }
             Row::Beats => {
                 let s = self.rows_snapshot.clone();
@@ -497,6 +562,14 @@ impl ControlDeck {
                 self.bpm_input.set_value(s.clone());
                 self.bpm_snapshot = s;
             }
+            Row::FxSpeed => {
+                let (min, max) = Row::FxSpeed.range();
+                let raw = self.fxspeed_input.value::<String>();
+                let clamped = raw.parse::<u16>().map(|v| v.clamp(min, max)).unwrap_or(min);
+                let s = clamped.to_string();
+                self.fxspeed_input.set_value(s.clone());
+                self.fxspeed_snapshot = s;
+            }
             Row::Beats => {
                 let (min, max) = Row::Beats.range();
                 let raw = self.rows_input.value::<String>();
@@ -536,6 +609,7 @@ impl ControlDeck {
         let (min, max) = row.range();
         let raw = match row {
             Row::Bpm => self.bpm_input.value::<String>(),
+            Row::FxSpeed => self.fxspeed_input.value::<String>(),
             Row::Beats => self.rows_input.value::<String>(),
             _ => return min,
         };
@@ -548,6 +622,10 @@ impl ControlDeck {
             Row::Bpm => {
                 self.bpm_input.set_value(s.clone());
                 self.bpm_snapshot = s;
+            }
+            Row::FxSpeed => {
+                self.fxspeed_input.set_value(s.clone());
+                self.fxspeed_snapshot = s;
             }
             Row::Beats => {
                 self.rows_input.set_value(s.clone());
@@ -625,9 +703,12 @@ impl ControlDeck {
 
         let bpm_plus_area = self.bpm_plus.area;
         let bpm_minus_area = self.bpm_minus.area;
+        let fxspeed_plus_area = self.fxspeed_plus.area;
+        let fxspeed_minus_area = self.fxspeed_minus.area;
         let rows_plus_area = self.rows_plus.area;
         let rows_minus_area = self.rows_minus.area;
         let bpm_input_area = self.bpm_input.area;
+        let fxspeed_input_area = self.fxspeed_input.area;
         let rows_input_area = self.rows_input.area;
         let trans_plus_area = self.trans_plus.area;
         let trans_minus_area = self.trans_minus.area;
@@ -648,6 +729,26 @@ impl ControlDeck {
                 self.confirm_editing();
             }
             self.selected_row = Row::Bpm;
+            self.selected_col = Col::Minus;
+            self.decrement();
+            self.update_focus_states();
+            return true;
+        }
+        if fxspeed_plus_area.contains(pos) {
+            if self.editing {
+                self.confirm_editing();
+            }
+            self.selected_row = Row::FxSpeed;
+            self.selected_col = Col::Plus;
+            self.increment();
+            self.update_focus_states();
+            return true;
+        }
+        if fxspeed_minus_area.contains(pos) {
+            if self.editing {
+                self.confirm_editing();
+            }
+            self.selected_row = Row::FxSpeed;
             self.selected_col = Col::Minus;
             self.decrement();
             self.update_focus_states();
@@ -701,6 +802,20 @@ impl ControlDeck {
                 self.confirm_editing();
             }
             self.selected_row = Row::Bpm;
+            self.selected_col = Col::Input;
+            self.start_editing();
+            self.update_focus_states();
+            return true;
+        }
+        if fxspeed_input_area.contains(pos) {
+            if self.editing && self.selected_row == Row::FxSpeed && self.selected_col == Col::Input
+            {
+                return true;
+            }
+            if self.editing {
+                self.confirm_editing();
+            }
+            self.selected_row = Row::FxSpeed;
             self.selected_col = Col::Input;
             self.start_editing();
             self.update_focus_states();
@@ -916,7 +1031,8 @@ impl Component for ControlDeck {
                             KeyCode::Up => {
                                 let new_row = match self.selected_row {
                                     Row::Bpm => Row::Bpm,
-                                    Row::Beats => Row::Bpm,
+                                    Row::FxSpeed => Row::Bpm,
+                                    Row::Beats => Row::FxSpeed,
                                     Row::Trans => Row::Beats,
                                     Row::SampleRate => Row::Trans,
                                     Row::ActionPlay => Row::SampleRate,
@@ -934,7 +1050,8 @@ impl Component for ControlDeck {
                             }
                             KeyCode::Down => {
                                 let new_row = match self.selected_row {
-                                    Row::Bpm => Row::Beats,
+                                    Row::Bpm => Row::FxSpeed,
+                                    Row::FxSpeed => Row::Beats,
                                     Row::Beats => Row::Trans,
                                     Row::Trans => Row::SampleRate,
                                     Row::SampleRate => Row::ActionPlay,
@@ -1020,8 +1137,8 @@ impl Component for ControlDeck {
         let sel_col = self.selected_col;
         let editing = self.editing;
 
-        let label_w = 7u16;
-        let input_w = [Row::Bpm, Row::Beats]
+        let label_w = Row::Bpm.label().len() as u16;
+        let input_w = [Row::Bpm, Row::FxSpeed, Row::Beats]
             .iter()
             .map(|r| r.range().1.to_string().len() as u16)
             .max()
@@ -1060,16 +1177,17 @@ impl Component for ControlDeck {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Fill(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
         ])
         .split(settings_col);
 
         for (row_area, row) in [
             (setting_rows[0], Row::Bpm),
-            (setting_rows[1], Row::Beats),
-            (setting_rows[2], Row::Trans),
+            (setting_rows[1], Row::FxSpeed),
+            (setting_rows[2], Row::Beats),
+            (setting_rows[3], Row::Trans),
         ] {
             let row_sel = row == sel_row;
             let input_focused = row_sel && sel_col == Col::Input;
@@ -1096,6 +1214,7 @@ impl Component for ControlDeck {
 
             let input_state = match row {
                 Row::Bpm => &mut self.bpm_input,
+                Row::FxSpeed => &mut self.fxspeed_input,
                 Row::Beats => &mut self.rows_input,
                 Row::Trans => &mut self.trans_input,
                 _ => unreachable!(),
@@ -1119,6 +1238,7 @@ impl Component for ControlDeck {
 
             let (plus_state, minus_state) = match row {
                 Row::Bpm => (&mut self.bpm_plus, &mut self.bpm_minus),
+                Row::FxSpeed => (&mut self.fxspeed_plus, &mut self.fxspeed_minus),
                 Row::Beats => (&mut self.rows_plus, &mut self.rows_minus),
                 Row::Trans => (&mut self.trans_plus, &mut self.trans_minus),
                 _ => unreachable!(),
@@ -1145,7 +1265,7 @@ impl Component for ControlDeck {
             );
         }
 
-        let rate_row_area = setting_rows[3];
+        let rate_row_area = setting_rows[4];
         let rate_row_sel = sel_row == Row::SampleRate;
         let [rate_label_area, rate_value_area, _] = Layout::horizontal([
             Constraint::Length(label_w),

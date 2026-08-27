@@ -10,13 +10,15 @@ use ratatui::{
     widgets::{Cell, Row, Table, TableState},
 };
 
+use rat_widget::choice::{Choice, ChoiceState};
+
 use crate::{
     action::ComponentAction,
     component::Component,
     file::{TrackerFile, TuningData},
     lane::{Lane, LaneKind},
     scheme::SCHEME,
-    tracker::{Beat, ChannelCmd, Pattern},
+    tracker::{Beat, ChannelCmd, Pattern, SequencerCmd},
 };
 
 mod keybinds {
@@ -29,6 +31,8 @@ mod keybinds {
     pub const VOL_INCREMENT: KeyCode = KeyCode::Char('=');
     pub const VOL_DECREMENT: KeyCode = KeyCode::Char('-');
 }
+
+const SEQ_CHOICE_LABELS: [&str; 4] = ["None", "Stop", "Tempo", "Speed"];
 
 #[derive(Default, Clone, Copy)]
 struct ViewLayout {
@@ -47,6 +51,10 @@ pub struct PatternEditor {
     lanes: Vec<Lane>,
     transpose: i32,
     vol_edit: Option<(u8, u8)>,
+    fx_edit: Option<((u8, u8), u8)>,
+    seq_choice: ChoiceState<usize>,
+    seq_choice_cell: Option<(u8, u8)>,
+    seq_edit: Option<((u8, u8), u8)>,
 }
 
 impl PatternEditor {
@@ -87,6 +95,10 @@ impl PatternEditor {
             sel_x: 2,
             sel_y: 0,
             vol_edit: None,
+            fx_edit: None,
+            seq_choice: ChoiceState::new(),
+            seq_choice_cell: None,
+            seq_edit: None,
         }
     }
 
@@ -111,7 +123,7 @@ impl PatternEditor {
             LaneKind::Beat => CellDisplay::BeatNum(beat),
             LaneKind::Seq => {
                 let b = Self::get_channel_beat(lane.ch, beat, pattern);
-                CellDisplay::SeqCmds(b.sqc_list.len())
+                CellDisplay::SeqCmds(b.sqc.clone())
             }
             LaneKind::Note => {
                 let b = Self::get_channel_beat(lane.ch, beat, pattern);
@@ -132,18 +144,11 @@ impl PatternEditor {
             }
             LaneKind::Fx => {
                 let b = Self::get_channel_beat(lane.ch, beat, pattern);
-                let n = b
-                    .cmd_list
-                    .iter()
-                    .filter(|c| {
-                        !matches!(
-                            c,
-                            ChannelCmd::Note(_) | ChannelCmd::NoteOff | ChannelCmd::Volume(_)
-                        )
-                    })
-                    .count()
-                    .min(0xF) as u8;
-                CellDisplay::Fx(n)
+                let arp = b.cmd_list.iter().find_map(|c| match c {
+                    ChannelCmd::Arpeggio(x, y) => Some((*x, *y)),
+                    _ => None,
+                });
+                CellDisplay::Fx(arp.map(|(x, y)| (1u8, x, y)))
             }
         }
     }
@@ -160,10 +165,10 @@ pub enum CellStyle {
 
 pub enum CellDisplay {
     BeatNum(u8),
-    SeqCmds(usize),
+    SeqCmds(Option<SequencerCmd>),
     Note(NoteCell),
     Vol(Option<u8>),
-    Fx(u8),
+    Fx(Option<(u8, u8, u8)>),
 }
 
 pub enum NoteCell {
@@ -176,9 +181,11 @@ impl CellDisplay {
     fn text(&self) -> String {
         match self {
             CellDisplay::BeatNum(beat) => format!("   {:02X}", beat),
-            CellDisplay::SeqCmds(n) => match n {
-                0 => "---".to_string(),
-                n => format!("[{:1x}]", n),
+            CellDisplay::SeqCmds(cmd) => match cmd {
+                None => "----".to_string(),
+                Some(SequencerCmd::Stop) => " STP".to_string(),
+                Some(SequencerCmd::Tempo(v)) => format!("T{:03}", v),
+                Some(SequencerCmd::Speed(v)) => format!("S{:03}", v),
             },
             CellDisplay::Note(cell) => match cell {
                 NoteCell::Empty => "---".to_string(),
@@ -186,12 +193,12 @@ impl CellDisplay {
                 NoteCell::On(s) => format!("{:<3}", s),
             },
             CellDisplay::Vol(maybe_set) => match maybe_set {
-                Some(v) => format!("{:02}", v),
+                Some(v) => format!("{:02X}", v),
                 None => "--".to_string(),
             },
-            CellDisplay::Fx(n) => match n {
-                0 => "---".to_string(),
-                n => format!("[{:1x}]", n),
+            CellDisplay::Fx(fx) => match fx {
+                None => "---".to_string(),
+                Some((id, x, y)) => format!("{:01X}{:01X}{:01X}", id, x, y),
             },
         }
     }
@@ -202,8 +209,13 @@ impl CellDisplay {
 
         let (fg, modifiers) = match self {
             CellDisplay::BeatNum(_) => (SCHEME.deepblue[2], Modifier::ITALIC),
-            CellDisplay::SeqCmds(_) => (
-                SCHEME.reduced_text_color(SCHEME.white[1]),
+            CellDisplay::SeqCmds(cmd) => (
+                match cmd {
+                    None => SCHEME.gray[0],
+                    Some(SequencerCmd::Stop) => SCHEME.red[1],
+                    Some(SequencerCmd::Tempo(_)) => SCHEME.deepblue[1],
+                    Some(SequencerCmd::Speed(_)) => SCHEME.green[1],
+                },
                 Modifier::empty(),
             ),
             CellDisplay::Note(cell) => (
@@ -221,10 +233,10 @@ impl CellDisplay {
                 },
                 Modifier::empty(),
             ),
-            CellDisplay::Fx(n) => (
-                match n {
-                    0 => SCHEME.gray[0],
-                    _ => SCHEME.yellow[1],
+            CellDisplay::Fx(fx) => (
+                match fx {
+                    None => SCHEME.gray[0],
+                    Some(_) => SCHEME.yellow[1],
                 },
                 Modifier::empty(),
             ),
@@ -277,23 +289,31 @@ impl Component for PatternEditor {
         if self.playing {
             return Vec::new();
         }
-        for event in &events {
-            let Event::Key(KeyEvent {
-                code,
-                kind: KeyEventKind::Press,
-                ..
-            }) = event
-            else {
-                continue;
-            };
+        let seq_popup_active = self.seq_choice.is_popup_active();
+        if !seq_popup_active {
+            for event in &events {
+                let Event::Key(KeyEvent {
+                    code,
+                    kind: KeyEventKind::Press,
+                    ..
+                }) = event
+                else {
+                    continue;
+                };
             match code {
                 KeyCode::Up => {
                     self.sel_y = if self.sel_y == 0 { 63 } else { self.sel_y - 1 };
                     self.vol_edit = None;
+                    self.fx_edit = None;
+                    self.seq_edit = None;
+                    self.seq_choice_cell = None;
                 }
                 KeyCode::Down => {
                     self.sel_y = if self.sel_y == 63 { 0 } else { self.sel_y + 1 };
                     self.vol_edit = None;
+                    self.fx_edit = None;
+                    self.seq_edit = None;
+                    self.seq_choice_cell = None;
                 }
                 KeyCode::Left => {
                     self.sel_x = if self.sel_x == 0 {
@@ -302,22 +322,35 @@ impl Component for PatternEditor {
                         self.sel_x - 1
                     };
                     self.vol_edit = None;
+                    self.fx_edit = None;
+                    self.seq_edit = None;
+                    self.seq_choice_cell = None;
                 }
                 KeyCode::Right => {
                     self.sel_x = (self.sel_x + 1) % self.lanes.len() as u8;
                     self.vol_edit = None;
+                    self.fx_edit = None;
+                    self.seq_edit = None;
+                    self.seq_choice_cell = None;
                 }
                 KeyCode::PageUp => {
                     let step = (self.view_layout.page_h / 2).max(1) as u8;
                     self.sel_y = self.sel_y.saturating_sub(step);
                     self.vol_edit = None;
+                    self.fx_edit = None;
+                    self.seq_edit = None;
+                    self.seq_choice_cell = None;
                 }
                 KeyCode::PageDown => {
                     let step = (self.view_layout.page_h / 2).max(1) as u8;
                     self.sel_y = (self.sel_y + step).min(63);
                     self.vol_edit = None;
+                    self.fx_edit = None;
+                    self.seq_edit = None;
+                    self.seq_choice_cell = None;
                 }
                 _ => {}
+            }
             }
         }
 
@@ -400,9 +433,9 @@ impl Component for PatternEditor {
                         modifiers,
                         ..
                     }) if matches!(*modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
-                        && c.is_ascii_digit() =>
+                        && c.is_ascii_hexdigit() =>
                     {
-                        let digit = c.to_digit(10).unwrap() as u8;
+                        let digit = c.to_digit(16).unwrap() as u8;
                         let prev = if self.vol_edit == Some(cell) {
                             let pattern = file.current_pattern(self.pattern_idx);
                             pattern[channel + 1][row]
@@ -416,7 +449,7 @@ impl Component for PatternEditor {
                         } else {
                             0
                         };
-                        let value = ((prev % 10) * 10 + digit).min(63);
+                        let value = ((prev % 16) * 16 + digit).min(0x3F);
                         self.vol_edit = Some(cell);
 
                         let pattern = file.current_pattern_mut(self.pattern_idx);
@@ -448,7 +481,7 @@ impl Component for PatternEditor {
                         let next_value = if *code == keybinds::VOL_INCREMENT {
                             match current {
                                 None => Some(0),
-                                Some(v) if v < 63 => Some(v + 1),
+                                Some(v) if v < 0x3F => Some(v + 1),
                                 Some(_) => None,
                             }
                         } else {
@@ -478,6 +511,218 @@ impl Component for PatternEditor {
                             .retain(|c| !matches!(c, ChannelCmd::Volume(_)));
                     }
                     _ => {}
+                }
+            }
+        }
+
+        if let (LaneKind::Fx, Some(channel)) = (lane_kind, ch) {
+            let cell = (self.sel_x, self.sel_y);
+            let row = self.sel_y as usize;
+            for event in &events {
+                match event {
+                    Event::Key(KeyEvent {
+                        code: KeyCode::Char(c),
+                        kind: KeyEventKind::Press,
+                        modifiers,
+                        ..
+                    }) if matches!(*modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+                        && c.is_ascii_hexdigit() =>
+                    {
+                        let digit = c.to_digit(16).unwrap() as u8;
+                        let (mut fx_id, mut fx_x, mut fx_y, digits_typed) =
+                            match self.fx_edit {
+                                Some((c, n)) if c == cell => {
+                                    let pattern = file.current_pattern(self.pattern_idx);
+                                    let (id, x, y) = pattern[channel + 1][row]
+                                        .cmd_list
+                                        .iter()
+                                        .find_map(|c| match c {
+                                            ChannelCmd::Arpeggio(x, y) => Some((1u8, *x, *y)),
+                                            _ => None,
+                                        })
+                                        .unwrap_or((0, 0, 0));
+                                    (id, x, y, n)
+                                }
+                                _ => (0, 0, 0, 0),
+                            };
+
+                        match digits_typed {
+                            0 => {
+                                if digit > 1 {
+                                    continue;
+                                }
+                                fx_id = digit;
+                            }
+                            1 => fx_x = digit,
+                            _ => fx_y = digit,
+                        }
+                        let digits_typed = (digits_typed + 1).min(3);
+                        self.fx_edit = Some((cell, digits_typed));
+
+                        let pattern = file.current_pattern_mut(self.pattern_idx);
+                        let beat = &mut pattern[channel + 1][row];
+                        beat.cmd_list
+                            .retain(|c| !matches!(c, ChannelCmd::Arpeggio(_, _)));
+                        if fx_id == 1 {
+                            beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y));
+                        }
+                    }
+                    Event::Key(KeyEvent {
+                        code,
+                        kind: KeyEventKind::Press,
+                        ..
+                    }) if keybinds::CLEAR.contains(code) => {
+                        let digits_typed = match self.fx_edit {
+                            Some((c, n)) if c == cell => n,
+                            _ => 3,
+                        };
+
+                        if digits_typed == 0 {
+                            self.fx_edit = None;
+                        } else {
+                            let remaining = digits_typed - 1;
+
+                            let (fx_id, fx_x, fx_y) = if remaining == 0 {
+                                self.fx_edit = None;
+                                (0, 0, 0)
+                            } else {
+                                self.fx_edit = Some((cell, remaining));
+                                let pattern = file.current_pattern(self.pattern_idx);
+                                let (id, x, y) = pattern[channel + 1][row]
+                                    .cmd_list
+                                    .iter()
+                                    .find_map(|c| match c {
+                                        ChannelCmd::Arpeggio(x, y) => Some((1u8, *x, *y)),
+                                        _ => None,
+                                    })
+                                    .unwrap_or((0, 0, 0));
+                                match remaining {
+                                    2 => (id, x, 0),
+                                    _ => (id, 0, 0),
+                                }
+                            };
+
+                            let pattern = file.current_pattern_mut(self.pattern_idx);
+                            let beat = &mut pattern[channel + 1][row];
+                            beat.cmd_list
+                                .retain(|c| !matches!(c, ChannelCmd::Arpeggio(_, _)));
+                            if fx_id == 1 {
+                                beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let (LaneKind::Seq, None) = (lane_kind, ch) {
+            let cell = (self.sel_x, self.sel_y);
+            let row = self.sel_y as usize;
+            let current_sqc = file.current_pattern(self.pattern_idx)[0][row].sqc.clone();
+
+            if self.seq_choice.is_popup_active() && self.seq_choice_cell == Some(cell) {
+                for event in &events {
+                    let Event::Key(KeyEvent {
+                        code,
+                        kind: KeyEventKind::Press,
+                        ..
+                    }) = event
+                    else {
+                        continue;
+                    };
+                    match code {
+                        KeyCode::Up => {
+                            let cur = self.seq_choice.value();
+                            if cur > 0 {
+                                self.seq_choice.set_value(cur - 1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            let cur = self.seq_choice.value();
+                            self.seq_choice
+                                .set_value((cur + 1).min(SEQ_CHOICE_LABELS.len() - 1));
+                        }
+                        KeyCode::Enter | KeyCode::Esc => {
+                            self.seq_choice.set_popup_active(false);
+                            self.seq_choice_cell = None;
+                            let idx = self.seq_choice.value();
+                            let new_sqc = match idx {
+                                1 => Some(SequencerCmd::Stop),
+                                2 => Some(SequencerCmd::Tempo(0)),
+                                3 => Some(SequencerCmd::Speed(0)),
+                                _ => None,
+                            };
+                            let pattern = file.current_pattern_mut(self.pattern_idx);
+                            pattern[0][row].sqc = new_sqc;
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                for event in &events {
+                    match event {
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Enter | KeyCode::Char(' '),
+                            kind: KeyEventKind::Press,
+                            ..
+                        }) => {
+                            let idx = match current_sqc {
+                                None => 0,
+                                Some(SequencerCmd::Stop) => 1,
+                                Some(SequencerCmd::Tempo(_)) => 2,
+                                Some(SequencerCmd::Speed(_)) => 3,
+                            };
+                            self.seq_choice.set_value(idx);
+                            self.seq_choice.set_popup_active(true);
+                            self.seq_choice_cell = Some(cell);
+                        }
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Char(c),
+                            kind: KeyEventKind::Press,
+                            modifiers,
+                            ..
+                        }) if matches!(*modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+                            && c.is_ascii_digit() =>
+                        {
+                            let digit = c.to_digit(10).unwrap() as u8;
+                            let digits_typed = match self.seq_edit {
+                                Some((c, n)) if c == cell => n,
+                                _ => 0,
+                            };
+
+                            let prev = match &current_sqc {
+                                Some(SequencerCmd::Tempo(v)) => *v,
+                                Some(SequencerCmd::Speed(v)) => *v,
+                                _ => 0,
+                            };
+                            let prev = if digits_typed == 0 { 0 } else { prev };
+                            let value = (prev as u32 * 10 + digit as u32).min(255) as u8;
+                            self.seq_edit = Some((cell, (digits_typed + 1).min(3)));
+
+                            let new_sqc = match &current_sqc {
+                                Some(SequencerCmd::Tempo(_)) => {
+                                    Some(SequencerCmd::Tempo(value.min(255)))
+                                }
+                                Some(SequencerCmd::Speed(_)) => {
+                                    Some(SequencerCmd::Speed(value.min(31)))
+                                }
+                                other => other.clone(),
+                            };
+                            let pattern = file.current_pattern_mut(self.pattern_idx);
+                            pattern[0][row].sqc = new_sqc;
+                        }
+                        Event::Key(KeyEvent {
+                            code,
+                            kind: KeyEventKind::Press,
+                            ..
+                        }) if keybinds::CLEAR.contains(code) => {
+                            self.seq_edit = None;
+                            let pattern = file.current_pattern_mut(self.pattern_idx);
+                            pattern[0][row].sqc = None;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -594,6 +839,60 @@ impl Component for PatternEditor {
 }
 
 impl PatternEditor {
+    pub fn render_popup(&mut self, frame: &mut Frame, boundary: Rect) {
+        if !self.seq_choice.is_popup_active() {
+            return;
+        }
+        let Some((sel_x, sel_y)) = self.seq_choice_cell else {
+            return;
+        };
+        let header_bottom = self.view_layout.table.y + 1;
+        let visible_row = (sel_y as usize).checked_sub(self.view_layout.scroll);
+        let Some(visible_row) = visible_row else {
+            return;
+        };
+        let cell_y = header_bottom + visible_row as u16;
+        if cell_y < header_bottom || cell_y >= self.view_layout.table.y + self.view_layout.table.height
+        {
+            return;
+        }
+
+        let mut cell_x = self.view_layout.table.x;
+        for lane in self.lanes.iter().take(sel_x as usize) {
+            cell_x += lane.width;
+        }
+        let lane = &self.lanes[sel_x as usize];
+        let cell_area = Rect {
+            x: cell_x,
+            y: cell_y,
+            width: lane.width,
+            height: 1,
+        };
+
+        let items: Vec<(usize, Line)> = SEQ_CHOICE_LABELS
+            .iter()
+            .enumerate()
+            .map(|(i, label)| (i, Line::from(*label)))
+            .collect();
+        let bg = SCHEME.true_dark_color(SCHEME.black[3]);
+        let (main, popup) = Choice::new()
+            .items(items)
+            .style(Style::new().bg(bg).fg(SCHEME.white[2]))
+            .select_style(
+                Style::default()
+                    .bg(SCHEME.orange[3])
+                    .fg(SCHEME.black[0])
+                    .add_modifier(Modifier::BOLD),
+            )
+            .popup_len(SEQ_CHOICE_LABELS.len() as u16)
+            .popup_boundary(boundary)
+            .into_widgets();
+        frame.render_stateful_widget(&main, cell_area, &mut self.seq_choice);
+        frame.render_stateful_widget(popup, cell_area, &mut self.seq_choice);
+    }
+}
+
+impl PatternEditor {
     pub fn on_mouse_event(&mut self, event: &Event) -> bool {
         let Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -633,3 +932,4 @@ impl PatternEditor {
         true
     }
 }
+

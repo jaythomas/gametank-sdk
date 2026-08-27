@@ -8,45 +8,64 @@ use crate::tracker::{ChannelCmd, SequencerCmd};
 const CPU_FREQ: f64 = 3_579_545.0;
 
 const CHANNELS: usize = 8;
-const BEATS: usize = 64;
-// freq_lo[64] + freq_hi[64] + vol[64]
-const CHANNEL_STRIDE: usize = BEATS * 3;
-const PATTERN_BYTES: usize = CHANNELS * CHANNEL_STRIDE;
 
 const VOL_NO_CHANGE: u8 = 0xFF;
+
+// Fx cell encoding
+const FX_NONE: u8 = 0;
+const FX_ARPEGGIO: u8 = 1;
 
 fn note_to_freq_inc(hz: f64, sample_rate_hz: f64) -> u16 {
     ((hz / sample_rate_hz) * 65536.0).round().min(65535.0) as u16
 }
 
-/// TODO: use SequencerCmds
-struct PatternMeta {
-    stop_beat: Option<u8>,
-    tempo_changes: Vec<(u8, u8)>, // (beat_index, bpm)
+// Resolve the phase increment of the note n number of `steps` above the base `note_name`
+// Returns `None` if note_name isn't found in the tuning table
+fn arp_offset_freq_inc(
+    file: &TrackerFile,
+    note_name: &str,
+    steps: u8,
+    sample_rate_hz: f64,
+) -> Option<u16> {
+    let idx = file.tuning.notes.get_index_of(note_name)?;
+    let target_idx = (idx + steps as usize).min(file.tuning.notes.len().saturating_sub(1));
+    let (_, &hz) = file.tuning.notes.get_index(target_idx)?;
+    Some(note_to_freq_inc(hz, sample_rate_hz))
 }
+
+// SequencerCmd encoding
+const SEQ_CMD_NONE: u8 = 0;
+const SEQ_CMD_STOP: u8 = 1;
+const SEQ_CMD_TEMPO: u8 = 2;
+const SEQ_CMD_SPEED: u8 = 3;
 
 fn bake_pattern(
     file: &TrackerFile,
     pattern_idx: usize,
+    beats: usize,
     sample_rate_hz: f64,
-) -> (Vec<u8>, PatternMeta) {
+) -> Vec<u8> {
     let pattern = file.current_pattern(pattern_idx as u8);
-    let mut out = vec![0u8; PATTERN_BYTES];
-
-    let mut stop_beat: Option<u8> = None;
-    let mut tempo_changes: Vec<(u8, u8)> = Vec::new();
+    let channel_stride = beats * 10;
+    let seq_cmd_base = 1 + CHANNELS * channel_stride;
+    let mut out = vec![0u8; seq_cmd_base + beats * 2];
+    out[0] = beats as u8;
 
     for ch in 0..CHANNELS {
         let mut cur_freq: u16 = 0;
+        let mut cur_note_name: Option<String> = None;
         let mut remembered_vol: u8 = 0;
         let mut muted = false;
 
-        for beat in 0..BEATS {
+        for beat in 0..beats {
             let row = &pattern[ch + 1][beat];
 
             let mut explicit_vol: Option<u8> = None;
             let mut has_note = false;
             let mut has_note_off = false;
+            let mut fx_id = FX_NONE;
+            let mut fx_x = 0u8;
+            let mut fx_y = 0u8;
 
             // Process ChannelCmds
             for cmd in &row.cmd_list {
@@ -55,10 +74,12 @@ fn bake_pattern(
                         has_note = true;
                         if let Some(&hz) = file.tuning.notes.get(name.as_str()) {
                             cur_freq = note_to_freq_inc(hz, sample_rate_hz);
+                            cur_note_name = Some(name.clone());
                         }
                     }
                     ChannelCmd::Phase(inc) => {
                         cur_freq = *inc;
+                        cur_note_name = None;
                     }
                     ChannelCmd::Volume(v) => {
                         explicit_vol = Some((*v).min(63));
@@ -66,24 +87,12 @@ fn bake_pattern(
                     ChannelCmd::NoteOff => {
                         has_note_off = true;
                     }
-                    _ => {}
-                }
-            }
-
-            // TODO: process SequencerCmd before channel 0
-            if ch == 0 {
-                for cmd in &row.sqc_list {
-                    match cmd {
-                        SequencerCmd::Stop => {
-                            if stop_beat.is_none() {
-                                stop_beat = Some(beat as u8);
-                            }
-                        }
-                        SequencerCmd::Tempo(bpm) => {
-                            tempo_changes.push((beat as u8, *bpm));
-                        }
-                        _ => {}
+                    ChannelCmd::Arpeggio(x, y) => {
+                        fx_id = FX_ARPEGGIO;
+                        fx_x = *x;
+                        fx_y = *y;
                     }
+                    _ => {}
                 }
             }
 
@@ -101,21 +110,42 @@ fn bake_pattern(
                 VOL_NO_CHANGE
             };
 
-            // 0xFF vol = no change
-            let base = ch * CHANNEL_STRIDE;
+            let (mut arp_x_freq, mut arp_y_freq) = (0u16, 0u16);
+            if fx_id == FX_ARPEGGIO
+                && let Some(name) = &cur_note_name
+            {
+                arp_x_freq = arp_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(0);
+                arp_y_freq = arp_offset_freq_inc(file, name, fx_y, sample_rate_hz).unwrap_or(0);
+            }
+
+            let base = 1 + ch * channel_stride;
             out[base + beat] = (cur_freq & 0xFF) as u8;
-            out[base + BEATS + beat] = (cur_freq >> 8) as u8;
-            out[base + BEATS * 2 + beat] = vol_out;
+            out[base + beats + beat] = (cur_freq >> 8) as u8;
+            out[base + beats * 2 + beat] = vol_out;
+            out[base + beats * 3 + beat] = fx_id;
+            out[base + beats * 4 + beat] = fx_x;
+            out[base + beats * 5 + beat] = fx_y;
+            out[base + beats * 6 + beat] = (arp_x_freq & 0xFF) as u8;
+            out[base + beats * 7 + beat] = (arp_x_freq >> 8) as u8;
+            out[base + beats * 8 + beat] = (arp_y_freq & 0xFF) as u8;
+            out[base + beats * 9 + beat] = (arp_y_freq >> 8) as u8;
         }
     }
 
-    (
-        out,
-        PatternMeta {
-            stop_beat,
-            tempo_changes,
-        },
-    )
+    // The SEQ lane carries one pattern-wide SequencerCmd per beat
+    for beat in 0..beats {
+        let seq_row = &pattern[0][beat];
+        let (seq_cmd_type, seq_cmd_value) = match &seq_row.sqc {
+            Some(SequencerCmd::Stop) => (SEQ_CMD_STOP, 0u8),
+            Some(SequencerCmd::Tempo(bpm)) => (SEQ_CMD_TEMPO, *bpm),
+            Some(SequencerCmd::Speed(speed)) => (SEQ_CMD_SPEED, *speed),
+            None => (SEQ_CMD_NONE, 0u8),
+        };
+        out[seq_cmd_base + beat] = seq_cmd_type;
+        out[seq_cmd_base + beats + beat] = seq_cmd_value;
+    }
+
+    out
 }
 
 fn write_wave_asm(file: &TrackerFile, dir: &Path) -> io::Result<()> {
@@ -150,44 +180,37 @@ fn sanitize_ident(s: &str) -> String {
 }
 
 fn write_track_asm(
-    bpm: f64,
+    bpm: u16,
+    speed: u8,
     stem: &str,
-    baked: &[(Vec<u8>, PatternMeta)],
+    baked: &[Vec<u8>],
     dir: &Path,
     sample_rate_reg: u8,
 ) -> io::Result<()> {
     let ident = sanitize_ident(stem);
     let pattern_len = baked.len();
-    let bpm_int = bpm.round() as u32;
     let sample_rate_hz = (CPU_FREQ / sample_rate_reg as f64).round() as u32;
     let mut s = String::new();
 
     writeln!(s, "; Auto-generated by gt-tracker.").unwrap();
     writeln!(
         s,
-        "; Track: {} | BPM: {} | Patterns: {} | Sample rate: 0x{:02X} ({} Hz)",
-        stem, bpm_int, pattern_len, sample_rate_reg, sample_rate_hz
+        "; Track: {} | BPM: {} | Speed: {} | Patterns: {} | Sample rate: 0x{:02X} ({} Hz)",
+        stem, bpm, speed, pattern_len, sample_rate_reg, sample_rate_hz
     )
     .unwrap();
     writeln!(s).unwrap();
     writeln!(s, ".section .rodata, \"a\"").unwrap();
     writeln!(s).unwrap();
 
-    // Track descriptor layout
-    //   [0:1]  bpm           u16
-    //   [2]    pattern_count u8
-    //   [3]    sequence_len  u8
-    //   [4:5]  sequence      u16 pointer → byte array of pattern indices
-    //   [6:7]  patterns      u16 pointer → table of u16 pattern data pointers
-    //   [8:9]  events        u16 pointer → table of u16 event list pointers
     writeln!(s, ".global {}_track", ident).unwrap();
     writeln!(s, "{}_track:", ident).unwrap();
-    writeln!(s, "    .word {}", bpm_int).unwrap();
+    writeln!(s, "    .word {}", bpm).unwrap();
+    writeln!(s, "    .word {}", speed).unwrap();
     writeln!(s, "    .byte {}", pattern_len).unwrap();
     writeln!(s, "    .byte {}", pattern_len).unwrap();
     writeln!(s, "    .word {}_sequence", ident).unwrap();
     writeln!(s, "    .word {}_patterns", ident).unwrap();
-    writeln!(s, "    .word {}_events", ident).unwrap();
     writeln!(s).unwrap();
 
     // Sequence: linear order (pattern 0, 1, 2, ...)
@@ -201,18 +224,8 @@ fn write_track_asm(
     for i in 0..pattern_len {
         writeln!(s, "    .word {}_pattern{}", ident, i + 1).unwrap();
     }
-    writeln!(s).unwrap();
 
-    // Event list pointer table
-    writeln!(s, "{}_events:", ident).unwrap();
-    for i in 0..pattern_len {
-        writeln!(s, "    .word {}_pattern{}_events", ident, i + 1).unwrap();
-    }
-
-    // Pattern data
-    // SOA per pattern: 8 channels × (64 freq_lo + 64 freq_hi + 64 volume) = 1536 bytes
-    // freq_inc 0x0000 = hold last note | volume 0xFF = hold | volume 0x00 = silence
-    for (i, (data, _)) in baked.iter().enumerate() {
+    for (i, data) in baked.iter().enumerate() {
         writeln!(s).unwrap();
         writeln!(s, ".align 2").unwrap();
         writeln!(s, ".global {}_pattern{}", ident, i + 1).unwrap();
@@ -223,33 +236,17 @@ fn write_track_asm(
         }
     }
 
-    // Event lists
-    // Format: [count: u8, (beat: u8, type: u8, value: u8) × count]
-    // Event types: 0x00 = Stop (value unused) | 0x01 = Tempo (value = new BPM)
-    for (i, (_, meta)) in baked.iter().enumerate() {
-        writeln!(s).unwrap();
-        writeln!(s, ".global {}_pattern{}_events", ident, i + 1).unwrap();
-        writeln!(s, "{}_pattern{}_events:", ident, i + 1).unwrap();
-
-        let mut events: Vec<(u8, u8, u8)> = Vec::new();
-        if let Some(beat) = meta.stop_beat {
-            events.push((beat, 0x00, 0x00));
-        }
-        for &(beat, bpm_val) in &meta.tempo_changes {
-            events.push((beat, 0x01, bpm_val));
-        }
-        events.sort_by_key(|e| e.0);
-
-        writeln!(s, "    .byte {}", events.len()).unwrap();
-        for (beat, typ, val) in &events {
-            writeln!(s, "    .byte 0x{:02X}, 0x{:02X}, 0x{:02X}", beat, typ, val).unwrap();
-        }
-    }
-
     std::fs::write(dir.join(format!("{}.asm", stem)), s)
 }
 
-pub fn export_all(file: &TrackerFile, bpm: f64, stem: &str, export_dir: &Path) -> io::Result<()> {
+pub fn export_all(
+    file: &TrackerFile,
+    bpm: u16,
+    speed: u8,
+    beats: u8,
+    stem: &str,
+    export_dir: &Path,
+) -> io::Result<()> {
     std::fs::create_dir_all(export_dir)?;
 
     let instruments_dir = export_dir.join("instruments");
@@ -263,11 +260,11 @@ pub fn export_all(file: &TrackerFile, bpm: f64, stem: &str, export_dir: &Path) -
 
     write_wave_asm(file, export_dir)?;
 
-    let baked: Vec<(Vec<u8>, PatternMeta)> = (0..file.patterns.len())
-        .map(|i| bake_pattern(file, i, CPU_FREQ / file.sample_rate as f64))
+    let baked: Vec<Vec<u8>> = (0..file.patterns.len())
+        .map(|i| bake_pattern(file, i, beats as usize, CPU_FREQ / file.sample_rate as f64))
         .collect();
 
-    write_track_asm(bpm, stem, &baked, export_dir, file.sample_rate)?;
+    write_track_asm(bpm, speed, stem, &baked, export_dir, file.sample_rate)?;
 
     Ok(())
 }

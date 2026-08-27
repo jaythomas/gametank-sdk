@@ -41,6 +41,8 @@ impl TrackerContainer {
         let mut control_deck = ControlDeck::init();
         control_deck.set_names(&file.instrument_names());
         control_deck.set_sample_rate(file.sample_rate);
+        control_deck.set_bpm(file.bpm);
+        control_deck.set_fxspeed(file.speed);
         let mut pattern_editor = PatternEditor::init();
         pattern_editor.set_tuning(file.tuning.clone());
         let mut tc = TrackerContainer {
@@ -56,8 +58,16 @@ impl TrackerContainer {
         self.control_deck.get_names()
     }
 
-    pub fn get_bpm(&self) -> f64 {
+    pub fn get_bpm(&self) -> u16 {
         self.control_deck.get_bpm()
+    }
+
+    pub fn get_fxspeed(&self) -> u8 {
+        self.control_deck.get_fxspeed()
+    }
+
+    pub fn get_beats(&self) -> u8 {
+        self.control_deck.get_beats()
     }
 
     pub fn pattern_idx(&self) -> u8 {
@@ -207,6 +217,7 @@ impl Component for TrackerContainer {
         render_focus_indicator(frame, focused_area);
 
         self.control_deck.render_popup(frame, area);
+        self.pattern_editor.render_popup(frame, area);
     }
 }
 
@@ -222,3 +233,6 @@ fn render_focus_indicator(frame: &mut Frame, area: Rect) {
         }
     }
 }
+
+
+

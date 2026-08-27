@@ -41,6 +41,8 @@ pub struct TrackerFile {
     pub patterns: Vec<Pattern>,
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u8,
+    pub bpm: u16,
+    pub speed: u8,
 }
 
 fn serialize_patterns<S>(patterns: &Vec<Pattern>, serializer: S) -> Result<S::Ok, S::Error>
@@ -226,6 +228,8 @@ impl TrackerFile {
             tuning: default_tuning(),
             patterns: vec![empty_pattern()],
             sample_rate: 0xD0,
+            bpm: 120,
+            speed: 6,
         }
     }
 

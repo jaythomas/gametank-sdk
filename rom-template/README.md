@@ -12,9 +12,9 @@
   - [Choosing a firmware](#choosing-a-firmware)
   - [Initialization](#initialization)
   - [Importing gt-tracker tracks](#importing-gt-tracker-tracks)
-  - [Firmware technical details](#firmware-technical-details)
   - [Wavetables](#wavetables)
   - [FM synthesis](#fm-synthesis)
+  - [Firmware technical details](#firmware-technical-details)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 

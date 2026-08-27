@@ -9,7 +9,7 @@ use gte_acp::{ARAM, AcpBus, audio_output::GameTankAudio};
 use gte_w65c02s::{System, W65C02S};
 use indexmap::IndexMap;
 
-use crate::tracker::{ChannelCmd, Pattern, empty_pattern};
+use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
 
 const FIRMWARE: &[u8; 4096] =
     include_bytes!("../../../../rom-template/gametank/audiofw/wavetable-8ch.bin");
@@ -21,7 +21,8 @@ const CPU_FREQ: f64 = 3_579_545.0;
 pub enum PlayerCmd {
     Play(usize),
     Pause,
-    SetBpm(f64),
+    SetBpm(u16),
+    SetSpeed(u8),
     UpdatePattern(Box<Pattern>),
     UpdateWaveform(usize, Box<[u8; 256]>),
     UpdateTuningNotes(IndexMap<String, f64>),
@@ -47,11 +48,21 @@ struct PlayerInner {
 
     playing: bool,
     current_row: usize,
+    bpm: u16,
+    speed: u8,
     samples_per_beat: f64,
     samples_until_next_beat: f64,
+    samples_per_tick: f64,
+    samples_until_next_tick: f64,
+    tick_count: u8,
     output_channels: usize,
     remembered_vol: [u8; AUDIO_CHANNELS],
     muted: [bool; AUDIO_CHANNELS],
+    base_freq: [u16; AUDIO_CHANNELS],
+    arp_active: [bool; AUDIO_CHANNELS],
+    arp_x_freq: [u16; AUDIO_CHANNELS],
+    arp_y_freq: [u16; AUDIO_CHANNELS],
+    cur_note_name: [Option<String>; AUDIO_CHANNELS],
 }
 
 impl PlayerInner {
@@ -61,7 +72,7 @@ impl PlayerInner {
         is_playing_out: Arc<AtomicBool>,
         output_sample_rate: f64,
         output_channels: usize,
-        bpm: f64,
+        bpm: u16,
         sample_rate_reg: u8,
     ) -> Self {
         unsafe {
@@ -78,7 +89,9 @@ impl PlayerInner {
         let acp_sample_rate = CPU_FREQ / sample_rate_reg as f64;
         let audio_out = GameTankAudio::new(acp_sample_rate, output_sample_rate);
 
-        let samples_per_beat = output_sample_rate * 60.0 / bpm.max(1.0);
+        let samples_per_beat = output_sample_rate * 60.0 / (bpm.max(1) as f64);
+        let speed: u8 = 6;
+        let samples_per_tick = samples_per_beat / speed.max(1) as f64;
 
         Self {
             cmd_rx,
@@ -96,12 +109,26 @@ impl PlayerInner {
             tuning_notes: IndexMap::new(),
             playing: false,
             current_row: 0,
+            bpm,
+            speed,
             samples_per_beat,
             samples_until_next_beat: samples_per_beat,
+            samples_per_tick,
+            samples_until_next_tick: samples_per_tick,
+            tick_count: 0,
             output_channels,
             remembered_vol: [0; AUDIO_CHANNELS],
             muted: [false; AUDIO_CHANNELS],
+            base_freq: [0; AUDIO_CHANNELS],
+            arp_active: [false; AUDIO_CHANNELS],
+            arp_x_freq: [0; AUDIO_CHANNELS],
+            arp_y_freq: [0; AUDIO_CHANNELS],
+            cur_note_name: std::array::from_fn(|_| None),
         }
+    }
+
+    fn recompute_tick_timing(&mut self) {
+        self.samples_per_tick = self.samples_per_beat / self.speed.max(1) as f64;
     }
 
     fn process_commands(&mut self) {
@@ -111,6 +138,12 @@ impl PlayerInner {
                     self.playing = true;
                     self.current_row = row;
                     self.samples_until_next_beat = self.samples_per_beat;
+                    self.samples_until_next_tick = self.samples_per_tick;
+                    self.tick_count = 0;
+                    self.rebuild_channel_state(row);
+                    for ch in 0..AUDIO_CHANNELS {
+                        self.set_voice_volume(ch, if self.muted[ch] { 0 } else { self.remembered_vol[ch] });
+                    }
                     self.trigger_row();
                     self.current_row_out.store(row, Ordering::Relaxed);
                     self.is_playing_out.store(true, Ordering::Relaxed);
@@ -127,7 +160,13 @@ impl PlayerInner {
                     self.buffer_position = 0;
                 }
                 PlayerCmd::SetBpm(bpm) => {
-                    self.samples_per_beat = self.output_sample_rate * 60.0 / bpm.max(1.0);
+                    self.bpm = bpm;
+                    self.samples_per_beat = self.output_sample_rate * 60.0 / (bpm.max(1) as f64);
+                    self.recompute_tick_timing();
+                }
+                PlayerCmd::SetSpeed(speed) => {
+                    self.speed = speed;
+                    self.recompute_tick_timing();
                 }
                 PlayerCmd::UpdatePattern(pat) => {
                     self.pattern = pat;
@@ -190,8 +229,82 @@ impl PlayerInner {
         }
     }
 
+    fn rebuild_channel_state(&mut self, row: usize) {
+        for ch in 0..AUDIO_CHANNELS {
+            let mut vol = 0u8;
+            let mut muted = true;
+            let mut note_name: Option<String> = None;
+            let mut base_freq: u16 = 0;
+            for r in 0..row {
+                let beat = &self.pattern[ch + 1][r];
+                for cmd in &beat.cmd_list {
+                    match cmd {
+                        ChannelCmd::Volume(v) => {
+                            vol = *v;
+                            muted = false;
+                        }
+                        ChannelCmd::NoteOff => {
+                            muted = true;
+                        }
+                        ChannelCmd::Note(name) => {
+                            muted = false;
+                            note_name = Some(name.clone());
+                            if let Some(&freq_hz) = self.tuning_notes.get(name.as_str()) {
+                                let freq_u32 =
+                                    ((freq_hz / self.acp_sample_rate) * 65536.0).round() as u32;
+                                base_freq = freq_u32.min(0xFFFF) as u16;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            self.remembered_vol[ch] = vol;
+            self.muted[ch] = muted;
+            self.cur_note_name[ch] = note_name;
+            self.base_freq[ch] = base_freq;
+            self.arp_active[ch] = false;
+        }
+
+        for r in 0..row {
+            if let Some(sqc) = &self.pattern[0][r].sqc {
+                match sqc {
+                    SequencerCmd::Tempo(bpm) => self.bpm = *bpm as u16,
+                    SequencerCmd::Speed(speed) => self.speed = *speed,
+                    SequencerCmd::Stop => {}
+                }
+            }
+        }
+        self.samples_per_beat = self.output_sample_rate * 60.0 / (self.bpm.max(1) as f64);
+        self.recompute_tick_timing();
+    }
+
     fn trigger_row(&mut self) {
         let row = self.current_row;
+
+        if let Some(sqc) = self.pattern[0][row].sqc.clone() {
+            match sqc {
+                SequencerCmd::Stop => {
+                    self.playing = false;
+                    self.is_playing_out.store(false, Ordering::Relaxed);
+                    for ch in 0..AUDIO_CHANNELS {
+                        self.set_voice_volume(ch, 0);
+                    }
+                    return;
+                }
+                SequencerCmd::Tempo(bpm) => {
+                    self.bpm = bpm as u16;
+                    self.samples_per_beat =
+                        self.output_sample_rate * 60.0 / (self.bpm.max(1) as f64);
+                    self.recompute_tick_timing();
+                }
+                SequencerCmd::Speed(speed) => {
+                    self.speed = speed;
+                    self.recompute_tick_timing();
+                }
+            }
+        }
+
         for ch in 0..AUDIO_CHANNELS {
             let beat = &self.pattern[ch + 1][row];
             let maybe_note = beat.cmd_list.iter().find_map(|c| match c {
@@ -206,6 +319,10 @@ impl PlayerInner {
                 .cmd_list
                 .iter()
                 .any(|c| matches!(c, ChannelCmd::NoteOff));
+            let maybe_arp = beat.cmd_list.iter().find_map(|c| match c {
+                ChannelCmd::Arpeggio(x, y) => Some((*x, *y)),
+                _ => None,
+            });
 
             if let Some(v) = maybe_vol {
                 self.remembered_vol[ch] = v;
@@ -216,11 +333,12 @@ impl PlayerInner {
                 self.set_voice_volume(ch, 0);
             }
 
-            if let Some(note_name) = maybe_note {
+            if let Some(note_name) = &maybe_note {
+                self.cur_note_name[ch] = Some(note_name.clone());
                 if let Some(&freq_hz) = self.tuning_notes.get(note_name.as_str()) {
                     let freq_u32 = ((freq_hz / self.acp_sample_rate) * 65536.0).round() as u32;
                     let freq = freq_u32.min(0xFFFF) as u16;
-                    self.set_voice_frequency(ch, freq);
+                    self.base_freq[ch] = freq;
                     self.set_voice_waveptr(ch, ch);
                     if maybe_vol.is_none() && self.muted[ch] {
                         self.muted[ch] = false;
@@ -228,7 +346,54 @@ impl PlayerInner {
                     }
                 }
             }
+
+            if let Some((x, y)) = maybe_arp {
+                let note_name = maybe_note.clone().or_else(|| self.cur_note_name[ch].clone());
+                if let Some(note_name) = &note_name {
+                    self.arp_x_freq[ch] = self
+                        .arp_offset_freq(note_name, x)
+                        .unwrap_or(self.base_freq[ch]);
+                    self.arp_y_freq[ch] = self
+                        .arp_offset_freq(note_name, y)
+                        .unwrap_or(self.base_freq[ch]);
+                    self.arp_active[ch] = true;
+                } else {
+                    self.arp_active[ch] = false;
+                    self.set_voice_frequency(ch, self.base_freq[ch]);
+                }
+            } else {
+                self.arp_active[ch] = false;
+                self.set_voice_frequency(ch, self.base_freq[ch]);
+            }
         }
+    }
+
+    fn arp_offset_freq(&self, note_name: &str, steps: u8) -> Option<u16> {
+        let idx = self.tuning_notes.get_index_of(note_name)?;
+        let target_idx = (idx + steps as usize).min(self.tuning_notes.len().saturating_sub(1));
+        let (_, &hz) = self.tuning_notes.get_index(target_idx)?;
+        let freq_u32 = ((hz / self.acp_sample_rate) * 65536.0).round() as u32;
+        Some(freq_u32.min(0xFFFF) as u16)
+    }
+
+    fn advance_tick(&mut self) {
+        let step = self.tick_count;
+        for ch in 0..AUDIO_CHANNELS {
+            if !self.arp_active[ch] {
+                continue;
+            }
+            let freq = match step {
+                0 => self.base_freq[ch],
+                1 => self.arp_x_freq[ch],
+                _ => self.arp_y_freq[ch],
+            };
+            self.set_voice_frequency(ch, freq);
+        }
+        self.tick_count = if self.tick_count >= 2 {
+            0
+        } else {
+            self.tick_count + 1
+        };
     }
 
     fn run_acp_until_sample(&mut self) -> bool {
@@ -272,10 +437,18 @@ impl PlayerInner {
         let frame_count = data.len() / out_ch;
 
         for frame in 0..frame_count {
+            self.samples_until_next_tick -= 1.0;
+            if self.samples_until_next_tick <= 0.0 {
+                self.samples_until_next_tick += self.samples_per_tick.max(1.0);
+                self.advance_tick();
+            }
+
             self.samples_until_next_beat -= 1.0;
             if self.samples_until_next_beat <= 0.0 {
                 self.samples_until_next_beat += self.samples_per_beat;
                 self.current_row = (self.current_row + 1) % ROWS_PER_PATTERN;
+                self.samples_until_next_tick = self.samples_per_tick.max(1.0);
+                self.tick_count = 0;
                 self.trigger_row();
                 self.current_row_out
                     .store(self.current_row, Ordering::Relaxed);
@@ -325,7 +498,7 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new(bpm: f64, sample_rate_reg: u8) -> Option<Self> {
+    pub fn new(bpm: u16, sample_rate_reg: u8) -> Option<Self> {
         let host = cpal::default_host();
         let device = host.default_output_device()?;
         let config = device.default_output_config().ok()?;
@@ -384,8 +557,12 @@ impl Player {
         self.current_row.load(Ordering::Relaxed)
     }
 
-    pub fn set_bpm(&self, bpm: f64) {
+    pub fn set_bpm(&self, bpm: u16) {
         let _ = self.cmd_tx.send(PlayerCmd::SetBpm(bpm));
+    }
+
+    pub fn set_speed(&self, speed: u8) {
+        let _ = self.cmd_tx.send(PlayerCmd::SetSpeed(speed));
     }
 
     pub fn update_pattern(&self, pattern: Pattern) {

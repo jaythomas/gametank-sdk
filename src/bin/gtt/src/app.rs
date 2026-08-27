@@ -51,7 +51,7 @@ impl App {
         let terminal = ratatui::init();
         execute!(std::io::stdout(), event::EnableMouseCapture)?;
         let tracker_container = TrackerContainer::init(&file_data);
-        let player = Player::new(120.0, file_data.sample_rate);
+        let player = Player::new(120, file_data.sample_rate);
         let mut file_browser = FileBrowser::new();
         if no_file {
             file_browser.visible = true;
@@ -78,6 +78,8 @@ impl App {
         for (i, name) in names.iter().enumerate() {
             self.file_data.instruments[i].name = name.clone();
         }
+        self.file_data.bpm = self.tracker_container.get_bpm();
+        self.file_data.speed = self.tracker_container.get_fxspeed();
         self.file_data.save(&self.input_path)
     }
 
@@ -96,12 +98,14 @@ impl App {
 
     fn run_export(&self, export_dir: &PathBuf) -> std::io::Result<()> {
         let bpm = self.tracker_container.get_bpm();
+        let speed = self.tracker_container.get_fxspeed();
+        let beats = self.tracker_container.get_beats();
         let stem = self
             .input_path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "track".to_string());
-        export::export_all(&self.file_data, bpm, &stem, export_dir)
+        export::export_all(&self.file_data, bpm, speed, beats, &stem, export_dir)
     }
 
     pub fn run(mut self) -> std::io::Result<()> {
@@ -255,6 +259,7 @@ impl App {
                             }
                             player.update_tuning_notes(self.file_data.tuning.notes.clone());
                             player.set_bpm(self.tracker_container.get_bpm());
+                            player.set_speed(self.tracker_container.get_fxspeed());
                             player.play(row);
                             self.tracker_container.set_playing(true);
                         }
@@ -275,7 +280,9 @@ impl App {
                     }
                 }
                 ComponentAction::OpenFile(path) => match TrackerFile::load(&path) {
-                    Ok(file_data) => {
+                    Ok(mut file_data) => {
+                        file_data.tuning.key_assignments =
+                            config_to_tuning_keys(&self.config.bindings.key_assignments);
                         self.file_data = file_data;
                         self.input_path = path;
                         self.tracker_container = TrackerContainer::init(&self.file_data);
@@ -290,6 +297,8 @@ impl App {
                 },
                 ComponentAction::CreateNewFile(path) => {
                     self.file_data = TrackerFile::empty();
+                    self.file_data.tuning.key_assignments =
+                        config_to_tuning_keys(&self.config.bindings.key_assignments);
                     self.input_path = path;
                     self.tracker_container = TrackerContainer::init(&self.file_data);
                     if let Some(player) = &mut self.player {

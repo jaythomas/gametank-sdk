@@ -67,11 +67,17 @@ This is QWERTY-agnostic, but assuming your keyboard is QWERTY-based, the key bin
 
 See the [Tuning editor](#tuning-editor) for how to update these mappings.
 
-**Delete** key removes the note/command the cursor has selected.
+**Backspace/Delete** key removes the note/command the cursor has selected.
 
 **`/~** sets Note OFF. While an empty beat carries a note, an explicit Note OFF effectively ends the note by temporarily muting the channel.
 
-**v** represents volume. Enter a value between 0 and 63 to change the volume for the channel. The last set volume carries to the next note, even if a note OFF is set along the way.
+**v** represents volume. Entered as a two-digit hexadecimal value from `00` to `3F` (0-63 decimal). Type 0-9/A-F to set digits or `-`/`=` to decrement/increment. The last set volume carries to the next note, even if a note OFF is set along the way.
+
+**Fx** lets you apply effects per channel.
+`0` - No effect
+`1xy` - Arpeggio. (x = how many steps up to a second note), (y = optional, steps up for the third note). The arpeggiation holds each note the number of ticks set by the FxSpeed.
+
+**SEQ** is the leftmost lane and carries one track-wide sequencer command per beat, independent of the channel columns. Use it to set pattern-wide changes to things like Tempo and FxSpeed. Use Enter/Up/Down/Esc on a SEQ cell to select a sequencer command.
 
 
 ## Control deck
@@ -85,6 +91,8 @@ The control deck allows you to edit global track parameters, pattern-level param
 **Trans** transposes the key bindings up/down one unison. With the default tuning, this means incrementing up one octave from c5-g6 to c6-g7. SHIFT key will also shift the range up temporarily.
 
 **Rate** sets the sample rate for the track. This does not carry over into the export data. A custom sample rate can be applied at runtime via the SDKs.
+
+**FxSpeed** sets the number of effect ticks per row, 1-31. (Less is faster.) Used by the Arpeggio effect's note-cycling rate. Override it mid-song with a per-beat **Speed** SEQ command.
 
 **Instruments** - there are 11 total instruments, which can be swapped out on any beat on any channel to provide a lot of versatility. The 11 instruments can be renamed from here, and their waveforms opened in the instrument editor from the `[⚙]` buttons.
 
@@ -174,23 +182,24 @@ Follow the instructions for your SDK on how to incorporate the track data into y
 
 The `<name>_track` symbol is a 10-byte binary descriptor:
 
-| offset | type  | field           | description                                  |
-| ------ | ----- | --------------- | -------------------------------------------- |
-| 0      | `u16` | `bpm`           | Base tempo in beats per minute               |
-| 2      | `u8`  | `pattern_count` | Number of unique patterns                    |
-| 3      | `u8`  | `sequence_len`  | Number of entries in the playback sequence   |
-| 4      | `u16` | `sequence`      | Pointer to `u8[]` of pattern indices         |
-| 6      | `u16` | `patterns`      | Pointer to `u16[]` of pattern data pointers  |
-| 8      | `u16` | `events`        | Pointer to `u16[]` of event list pointers    |
+| offset | type  | field           | description                                    |
+| ------ | ----  | -----           | -----------                                    |
+| 0      | `u16` | `bpm`           | Base tempo, beats per minute                   |
+| 2      | `u16` | `speed`         | FxSpeed. Track-wide number of ticks per effect |
+| 4      | `u8`  | `pattern_count` | Number of unique patterns                      |
+| 5      | `u8`  | `sequence_len`  | Number of entries in the playback sequence     |
+| 6      | `u16` | `sequence`      | Pointer to `u8[]` of pattern indices           |
+| 8      | `u16` | `patterns`      | Pointer to `u16[]` of pattern data pointers    |
 
-A `freq_inc` of `0x0000` holds the previous note.
-A volume of `0xFF` holds the previous volume.
+Each entry in `patterns` points to a pattern data block laid out as:
 
-Event lists use the format `[count: u8, (beat: u8, type: u8, value: u8) * count]`.
-
-Events:
-
-| value  | type   | description           |
-| ------ | ------ | --------------------- |
-| `0x00` | Stop   | end pattern early     |
-| `0x01` | Tempo  | set BPM to `value`    |
+> [0] beats: u8 (row count for this pattern)
+> per channel, each array sized to `beats` bytes:
+>  freq_lo[beats], freq_hi[beats]   16-bit phase increment; 0x0000 holds the previous note
+>  vol[beats]                       0-63, or 0xFF to hold the previous volume
+>  fx_id[beats]                     0 = none, 1 = Arpeggio
+>  fx_x[beats], fx_y[beats]         raw effect parameters (scale-degree offsets for Arpeggio)
+>  arp_freq_x_lo/hi[beats]          baked +x scale-degree frequency (Arpeggio only)
+>  arp_freq_y_lo/hi[beats]          baked +y scale-degree frequency (Arpeggio only)
+>  seq_cmd_type[beats]              0 = none, 1 = Stop, 2 = Tempo, 3 = Speed
+>  seq_cmd_value[beats]             raw command value (unused for Stop)

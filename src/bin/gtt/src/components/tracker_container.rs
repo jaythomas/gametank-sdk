@@ -42,7 +42,7 @@ impl TrackerContainer {
         control_deck.set_names(&file.instrument_names());
         control_deck.set_sample_rate(file.sample_rate);
         control_deck.set_bpm(file.bpm);
-        control_deck.set_fxspeed(file.speed);
+        control_deck.set_fx_speed(file.fx_speed);
         let mut pattern_editor = PatternEditor::init();
         pattern_editor.set_tuning(file.tuning.clone());
         let mut tc = TrackerContainer {
@@ -62,16 +62,18 @@ impl TrackerContainer {
         self.control_deck.get_bpm()
     }
 
-    pub fn get_fxspeed(&self) -> u8 {
-        self.control_deck.get_fxspeed()
-    }
-
-    pub fn get_beats(&self) -> u8 {
-        self.control_deck.get_beats()
+    pub fn get_fx_speed(&self) -> u8 {
+        self.control_deck.get_fx_speed()
     }
 
     pub fn pattern_idx(&self) -> u8 {
         self.pattern_editor.pattern_idx
+    }
+
+    pub fn set_pattern_idx(&mut self, idx: u8) {
+        self.pattern_editor.pattern_idx = idx;
+        self.pattern_editor.sel_x = 2;
+        self.pattern_editor.sel_y = 0;
     }
 
     pub fn set_playing(&mut self, playing: bool) {
@@ -125,6 +127,11 @@ impl TrackerContainer {
 
 impl Component for TrackerContainer {
     fn update(&mut self, events: Vec<Event>, file: &mut TrackerFile) -> Vec<ComponentAction> {
+        self.control_deck.set_pattern_info(
+            self.pattern_editor.pattern_idx,
+            file.patterns.len(),
+            file.beats_for(self.pattern_editor.pattern_idx),
+        );
         let mut actions_out = Vec::new();
         let mut keyboard_pass: Vec<Event> = Vec::with_capacity(events.len());
         let mut mouse_pass: Vec<Event> = Vec::new();
@@ -182,6 +189,11 @@ impl Component for TrackerContainer {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, file: &TrackerFile) {
+        self.control_deck.set_pattern_info(
+            self.pattern_editor.pattern_idx,
+            file.patterns.len(),
+            file.beats_for(self.pattern_editor.pattern_idx),
+        );
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints(vec![

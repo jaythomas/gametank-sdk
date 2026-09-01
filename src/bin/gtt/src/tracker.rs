@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PATTERN_TABLE_WIDTH: u16 = 116;
+pub const PATTERN_TABLE_WIDTH: u16 = 117;
 pub const PATTERN_BEATS: usize = 64;
 
 pub type Pattern = [[Beat; PATTERN_BEATS]; 9];
@@ -23,7 +23,10 @@ pub enum SequencerCmd {
     // Pattern(u8),
     Stop,
     Tempo(u8),
-    Speed(u8),
+    FxSpeed(u8),
+    FlowCount(u8),
+    CountJump(u8, u8),
+    Jump(u8, u8),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

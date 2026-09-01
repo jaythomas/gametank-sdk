@@ -39,10 +39,12 @@ pub struct TrackerFile {
         deserialize_with = "deserialize_patterns"
     )]
     pub patterns: Vec<Pattern>,
+    #[serde(default = "default_pattern_beats")]
+    pub pattern_beats: Vec<u8>,
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u8,
     pub bpm: u16,
-    pub speed: u8,
+    pub fx_speed: u8,
 }
 
 fn serialize_patterns<S>(patterns: &Vec<Pattern>, serializer: S) -> Result<S::Ok, S::Error>
@@ -213,6 +215,10 @@ fn default_sample_rate() -> u8 {
     0xD0
 }
 
+fn default_pattern_beats() -> Vec<u8> {
+    vec![64]
+}
+
 impl TrackerFile {
     pub fn empty() -> Self {
         let mut square = vec![0xFFu8; 256];
@@ -227,9 +233,10 @@ impl TrackerFile {
             }),
             tuning: default_tuning(),
             patterns: vec![empty_pattern()],
+            pattern_beats: vec![64],
             sample_rate: 0xD0,
             bpm: 120,
-            speed: 6,
+            fx_speed: 6,
         }
     }
 
@@ -247,7 +254,23 @@ impl TrackerFile {
         while idx >= self.patterns.len() {
             self.patterns.push(empty_pattern());
         }
+        while idx >= self.pattern_beats.len() {
+            self.pattern_beats.push(64);
+        }
         &mut self.patterns[idx]
+    }
+
+    pub fn beats_for(&self, pattern_idx: u8) -> u8 {
+        let idx = pattern_idx as usize;
+        self.pattern_beats.get(idx).copied().unwrap_or(64)
+    }
+
+    pub fn set_beats_for(&mut self, pattern_idx: u8, beats: u8) {
+        let idx = pattern_idx as usize;
+        while idx >= self.pattern_beats.len() {
+            self.pattern_beats.push(64);
+        }
+        self.pattern_beats[idx] = beats.clamp(1, crate::tracker::PATTERN_BEATS as u8);
     }
 
     pub fn instrument_names(&self) -> [String; NUM_INSTRUMENTS] {
@@ -274,9 +297,13 @@ impl TrackerFile {
 
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let bytes = std::fs::read(path)?;
-        let file: TrackerFile = rmp_serde::from_slice(&bytes)?;
+        let mut file: TrackerFile = rmp_serde::from_slice(&bytes)?;
         file.validate()
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        while file.pattern_beats.len() < file.patterns.len() {
+            file.pattern_beats.push(64);
+        }
+        file.pattern_beats.truncate(file.patterns.len().max(1));
         Ok(file)
     }
 

@@ -29,9 +29,9 @@ impl Lane {
 
     pub fn seq() -> Self {
         Self {
-            title: "SEQ ".to_string(),
+            title: "SEQ  ".to_string(),
             padding: (0, 1),
-            width: 5,
+            width: 6,
             kind: LaneKind::Seq,
             ch: None,
         }

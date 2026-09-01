@@ -19,4 +19,11 @@ pub enum ComponentAction {
     SetSampleRate(u8),
     OpenFile(PathBuf),
     CreateNewFile(PathBuf),
+    PatternPrev,
+    PatternNext,
+    PatternNew,
+    PatternCopy,
+    PatternDelete,
+    PatternZap,
+    OpenPatternDeleteConfirm,
 }

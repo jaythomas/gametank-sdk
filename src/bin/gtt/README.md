@@ -52,9 +52,21 @@ BEAT  SEQ  ch0 v ::↗↘   ch1 v ::↗↘   ...
 The total set of beats on screen represents a **pattern**.
 The number of beats in the pattern can be adjusted on the control deck or via the command palette `:beats [1-255]`.
 
-To enter notes, select the column with the channel number (ie ch0) and use the top row of letters and numbers for note entry.
-The default tuning is mapped similar to a piano roll.
-This is QWERTY-agnostic, but assuming your keyboard is QWERTY-based, the key binding would work like this:
+**SEQ** is the leftmost lane. Sequence Commands are track-wide. They affect all channels unless a channel explicitly overrides the command. Use Enter/Up/Down/Esc on a SEQ cell to select a sequencer command.
+
+| ID | Label           | Parameters                                     | Description           |
+| -- | -----           | ----------                                     | -----------           |
+| 0  | (no effect)     |                                                |                       |
+| 1  | `[S]top`        | (none)                                         | Ends track playback   |
+| 2  | `[T]empo`       | x = tempo                                      | Updates the track BPM |
+| 3  | `F[x]Speed`     | x (00-1F) = number of ticks                    | How many ticks a second effects will run at. (Less is faster.) A channel Arpeggio effect will count a number of ticks/frames before the next note in the Arpeggio is played. |
+| 4  | `[#] FlowCount` | x (00-FF) = value for "count" register         | Replace the value of the count register. Any number greater than 0 will trigger the conditional "CountJump". | 
+| 5  | `Count[j]ump`   | x (00-FF) = pattern idx, y (00-FF) = beat idx  | When the count register is greater than 0, jump to the given pattern+beat, then decrement the count register by 1. Essential for looping a section of track a finite number of times. When the register is 0, this command does nothing. |
+| 6  | `[J]ump`        | x (00-FF) = pattern idx, y (00-FF) = beat idx  | Unconditionally jump to a given pattern and beat. Useful for jumping to the next pattern or looping a track indefinitely. |
+
+
+**Notes**: select the column with the channel number (ie ch0) and use the top row of letters and numbers for note entry.
+The default tuning is mapped similar to a piano roll. This is QWERTY-agnostic, but assuming your keyboard is QWERTY-based, the key binding would work like this:
 
 ```
  Note OFF
@@ -74,10 +86,16 @@ See the [Tuning editor](#tuning-editor) for how to update these mappings.
 **v** represents volume. Entered as a two-digit hexadecimal value from `00` to `3F` (0-63 decimal). Type 0-9/A-F to set digits or `-`/`=` to decrement/increment. The last set volume carries to the next note, even if a note OFF is set along the way.
 
 **Fx** lets you apply effects per channel.
-`0` - No effect
-`1xy` - Arpeggio. (x = how many steps up to a second note), (y = optional, steps up for the third note). The arpeggiation holds each note the number of ticks set by the FxSpeed.
 
-**SEQ** is the leftmost lane and carries one track-wide sequencer command per beat, independent of the channel columns. Use it to set pattern-wide changes to things like Tempo and FxSpeed. Use Enter/Up/Down/Esc on a SEQ cell to select a sequencer command.
+| ID | Label       | Parameters | Description                  |
+| -- | -----       | ---------- | -----------                  |
+| 0  | (no effect) |            |                              |
+| 1  | Arpeggio    | x (0-F) = how many steps up to the second note, y (0-F) = optional, steps up for a third note. | The arpeggiation holds each note the number of ticks set by the FxSpeed. |
+| 2  | PitchUp     | x (00-FF) = how many steps up to slide to | Portamento that increments at a rate of FxSpeed. |
+| 3  | PitchDown   | x (00-FF) = how many steps down to slide to | Portamento that increments at a rate of FxSpeed. |
+| 4  | FadeIn      | x (00-3B) = how many ticks to hold each volume increment | Play note with a volume of 0 and raise volume up to the volume level set for that beat. |
+| 5  | FadeOut     | x (00-3B) = how many ticks to hold each volume increment | Play note at the volume level set for that beat and lower volume down to as low as the FadeOut speed allows |
+| 6  | Tremble     | x (00-3B) = how many ticks to hold a note off then on | Hard tremolo. Rapidly play and mute a note.
 
 
 ## Control deck
@@ -92,7 +110,7 @@ The control deck allows you to edit global track parameters, pattern-level param
 
 **Rate** sets the sample rate for the track. This does not carry over into the export data. A custom sample rate can be applied at runtime via the SDKs.
 
-**FxSpeed** sets the number of effect ticks per row, 1-31. (Less is faster.) Used by the Arpeggio effect's note-cycling rate. Override it mid-song with a per-beat **Speed** SEQ command.
+**FxSpeed** is the starting effects speed for the track (see **SEQ** commands for more details).
 
 **Instruments** - there are 11 total instruments, which can be swapped out on any beat on any channel to provide a lot of versatility. The 11 instruments can be renamed from here, and their waveforms opened in the instrument editor from the `[⚙]` buttons.
 
@@ -113,10 +131,12 @@ This provides quick keyboard-driven actions. All the commands available on the c
 When you start typing `:` your command input will start appearing at the very bottom of the screen.
 Press Enter to execute or Esc to cancel the command input.
 
-| command       | description            |
-| ------------- | ---------------------- |
-| `:q`/`:quit`  | quit the application   |
-| `:w`/`:write` | save changes to file   |
+| command         | description            |
+| -------         | -----------            |
+| `:exp`/`export` | export track           |
+| `:instrument`   | open instrument editor |
+| `:w`/`:write`   | save changes to file   |
+| `:q`/`:quit`    | quit the application   |
 
 TODO: lots more commands
 
@@ -180,16 +200,14 @@ Follow the instructions for your SDK on how to incorporate the track data into y
 
 ## Track descriptor reference
 
-The `<name>_track` symbol is a 10-byte binary descriptor:
+The `<name>_track` symbol is a 7-byte binary descriptor:
 
 | offset | type  | field           | description                                    |
 | ------ | ----  | -----           | -----------                                    |
 | 0      | `u16` | `bpm`           | Base tempo, beats per minute                   |
 | 2      | `u16` | `speed`         | FxSpeed. Track-wide number of ticks per effect |
 | 4      | `u8`  | `pattern_count` | Number of unique patterns                      |
-| 5      | `u8`  | `sequence_len`  | Number of entries in the playback sequence     |
-| 6      | `u16` | `sequence`      | Pointer to `u8[]` of pattern indices           |
-| 8      | `u16` | `patterns`      | Pointer to `u16[]` of pattern data pointers    |
+| 5      | `u16` | `patterns`      | Pointer to `u16[]` of pattern data pointers    |
 
 Each entry in `patterns` points to a pattern data block laid out as:
 
@@ -197,9 +215,10 @@ Each entry in `patterns` points to a pattern data block laid out as:
 > per channel, each array sized to `beats` bytes:
 >  freq_lo[beats], freq_hi[beats]   16-bit phase increment; 0x0000 holds the previous note
 >  vol[beats]                       0-63, or 0xFF to hold the previous volume
->  fx_id[beats]                     0 = none, 1 = Arpeggio
+>  fx_id[beats]                     equal to the channel effect ID (see channel FX definitions above); 0 = no effect
 >  fx_x[beats], fx_y[beats]         raw effect parameters (scale-degree offsets for Arpeggio)
 >  arp_freq_x_lo/hi[beats]          baked +x scale-degree frequency (Arpeggio only)
 >  arp_freq_y_lo/hi[beats]          baked +y scale-degree frequency (Arpeggio only)
->  seq_cmd_type[beats]              0 = none, 1 = Stop, 2 = Tempo, 3 = Speed
->  seq_cmd_value[beats]             raw command value (unused for Stop)
+>  seq_cmd_type[beats]              equal to the sequence command ID (see SEQ definitions above); 0 = no command
+>  seq_cmd_value[beats]             raw command value (unused for Stop; pattern index for CountJump)
+>  seq_cmd_value2[beats]            second raw command value (only used for CountJump: target beat)

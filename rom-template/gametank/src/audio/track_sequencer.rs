@@ -41,7 +41,9 @@ pub struct TrackSequencer {
     bpm: u16,
     speed: u16,
     pattern_idx: u8,
-    sequence_len: u8,
+    pattern_count: u8,
+    flow_count: u8,
+    stopped: bool,
 }
 
 // Channel base note pitch, written by `advance_beat`. This is different than the active
@@ -55,21 +57,23 @@ static mut ARP_Y_FREQ: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
 // See the gt-tracker README for the track descriptor layout
 const TRACK_BPM_OFFSET: usize = 0;
 const TRACK_SPEED_OFFSET: usize = 2;
-const TRACK_SEQUENCE_LEN_OFFSET: usize = 5;
-const TRACK_SEQUENCE_PTR_OFFSET: usize = 6;
-const TRACK_PATTERNS_PTR_OFFSET: usize = 8;
+const TRACK_PATTERN_COUNT_OFFSET: usize = 4;
+const TRACK_PATTERNS_PTR_OFFSET: usize = 5;
 
 // seq_cmd_type values baked into each pattern's trailing per-beat arrays
 const SEQ_CMD_STOP: u8 = 1;
 const SEQ_CMD_TEMPO: u8 = 2;
 const SEQ_CMD_SPEED: u8 = 3;
+const SEQ_CMD_FLOW_COUNT: u8 = 4;
+const SEQ_CMD_COUNT_JUMP: u8 = 5;
+const SEQ_CMD_JUMP: u8 = 6;
 
 impl TrackSequencer {
     // Create a sequencer for the given track descriptor
     pub fn new(track: *const u8) -> Self {
         let bpm = unsafe { read_u16(track, TRACK_BPM_OFFSET) };
         let speed = unsafe { read_u16(track, TRACK_SPEED_OFFSET) };
-        let sequence_len = unsafe { *track.add(TRACK_SEQUENCE_LEN_OFFSET) };
+        let pattern_count = unsafe { *track.add(TRACK_PATTERN_COUNT_OFFSET) };
         Self {
             track,
             beat: 0,
@@ -79,7 +83,9 @@ impl TrackSequencer {
             bpm,
             speed,
             pattern_idx: 0,
-            sequence_len,
+            pattern_count,
+            flow_count: 0,
+            stopped: false,
         }
     }
 
@@ -94,6 +100,10 @@ impl TrackSequencer {
 
     // Advance the sequencer by one frame every game loop
     pub fn tick(&mut self) {
+        if self.stopped {
+            return;
+        }
+
         self.frame_acc += self.bpm;
         let mut remaining = self.speed;
         while remaining > 0 {
@@ -139,22 +149,87 @@ impl TrackSequencer {
         };
     }
 
+    fn pattern_ptr(&self, pattern_idx: u8) -> *const u8 {
+        let pat_table = unsafe { read_u16(self.track, TRACK_PATTERNS_PTR_OFFSET) } as *const u16;
+        unsafe { read_ptr(pat_table, pattern_idx as usize) as *const u8 }
+    }
+
+    // Processes sequence and channel commands for the current pattern_idx+beat
     fn advance_beat(&mut self) {
-        let t = self.track;
-        let seq = unsafe { read_u16(t, TRACK_SEQUENCE_PTR_OFFSET) } as *const u8;
-        let pat_table = unsafe { read_u16(t, TRACK_PATTERNS_PTR_OFFSET) } as *const u16;
+        loop {
+            let pat = self.pattern_ptr(self.pattern_idx);
+            let pattern_beats = unsafe { *pat } as usize;
+            let data = unsafe { pat.add(1) };
+            // channel_stride = pattern_beats * CHANNEL_ARRAYS
+            let mut channel_stride = 0usize;
+            for _ in 0..CHANNEL_ARRAYS {
+                channel_stride += pattern_beats;
+            }
 
-        let seq_idx = self.pattern_idx as usize;
-        let pat_idx = unsafe { *seq.add(seq_idx) } as usize;
-        let pat = unsafe { read_ptr(pat_table, pat_idx) } as *const u8;
+            let beat = self.beat as usize;
 
-        let pattern_beats = unsafe { *pat } as usize;
-        let data = unsafe { pat.add(1) };
-        // channel_stride = pattern_beats * CHANNEL_ARRAYS
-        let mut channel_stride = 0usize;
-        for _ in 0..CHANNEL_ARRAYS {
-            channel_stride += pattern_beats;
+            let seq_cmd_base = {
+                let mut b = 0usize;
+                for _ in 0..VOICE_COUNT {
+                    b += channel_stride;
+                }
+                b
+            };
+            let off_seq_cmd_type = 0usize;
+            let off_seq_cmd_value = off_seq_cmd_type + pattern_beats;
+            let off_seq_cmd_value2 = off_seq_cmd_value + pattern_beats;
+            let seq_cmd_type = unsafe { *data.add(seq_cmd_base + off_seq_cmd_type + beat) };
+            let seq_cmd_value = unsafe { *data.add(seq_cmd_base + off_seq_cmd_value + beat) };
+            let seq_cmd_value2 = unsafe { *data.add(seq_cmd_base + off_seq_cmd_value2 + beat) };
+
+            match seq_cmd_type {
+                SEQ_CMD_STOP => {
+                    self.stopped = true;
+                    return;
+                }
+                SEQ_CMD_TEMPO => {
+                    self.bpm = seq_cmd_value as u16;
+                }
+                SEQ_CMD_SPEED => {
+                    self.speed = seq_cmd_value as u16;
+                }
+                SEQ_CMD_FLOW_COUNT => {
+                    self.flow_count = seq_cmd_value;
+                }
+                SEQ_CMD_COUNT_JUMP => {
+                    if self.flow_count > 0 {
+                        self.flow_count -= 1;
+                        self.pattern_idx = seq_cmd_value.min(self.pattern_count.saturating_sub(1));
+                        self.beat = seq_cmd_value2;
+                        continue;
+                    }
+                }
+                SEQ_CMD_JUMP => {
+                    self.pattern_idx = seq_cmd_value.min(self.pattern_count.saturating_sub(1));
+                    self.beat = seq_cmd_value2;
+                    continue;
+                }
+                _ => {}
+            }
+
+            self.trigger_channels(data, channel_stride, pattern_beats, beat);
+            self.tick_count = 0;
+
+            self.beat += 1;
+            if (self.beat as usize) >= pattern_beats {
+                self.beat = 0;
+            }
+            return;
         }
+    }
+
+    fn trigger_channels(
+        &mut self,
+        data: *const u8,
+        channel_stride: usize,
+        pattern_beats: usize,
+        beat: usize,
+    ) {
         let off_freq_lo = 0usize;
         let off_freq_hi = off_freq_lo + pattern_beats;
         let off_vol = off_freq_hi + pattern_beats;
@@ -165,37 +240,6 @@ impl TrackSequencer {
         let off_arp_x_hi = off_arp_x_lo + pattern_beats;
         let off_arp_y_lo = off_arp_x_hi + pattern_beats;
         let off_arp_y_hi = off_arp_y_lo + pattern_beats;
-
-        let beat = self.beat as usize;
-
-        // Sequence commands for the current beat are processed first, before any channel
-        // data is applied, so Tempo/Speed take effect immediately for this beat and Stop
-        // pre-empts this beat's notes entirely rather than playing them first.
-        let seq_cmd_base = {
-            let mut b = 0usize;
-            for _ in 0..VOICE_COUNT {
-                b += channel_stride;
-            }
-            b
-        };
-        let off_seq_cmd_type = 0usize;
-        let off_seq_cmd_value = off_seq_cmd_type + pattern_beats;
-        let seq_cmd_type = unsafe { *data.add(seq_cmd_base + off_seq_cmd_type + beat) };
-        let seq_cmd_value = unsafe { *data.add(seq_cmd_base + off_seq_cmd_value + beat) };
-
-        if seq_cmd_type == SEQ_CMD_STOP {
-            self.next_pattern();
-            return;
-        }
-        match seq_cmd_type {
-            SEQ_CMD_TEMPO => {
-                self.bpm = seq_cmd_value as u16;
-            }
-            SEQ_CMD_SPEED => {
-                self.speed = seq_cmd_value as u16;
-            }
-            _ => {}
-        }
 
         let v = voices();
         let mut base = 0usize;
@@ -232,24 +276,6 @@ impl TrackSequencer {
             }
             base += channel_stride;
         }
-        self.tick_count = 0;
-
-        self.beat += 1;
-        if (self.beat as usize) >= pattern_beats {
-            self.next_pattern();
-        }
-    }
-
-    fn next_pattern(&mut self) {
-        self.beat = 0;
-        self.tick_count = 0;
-        self.tick_acc = 0;
-        self.pattern_idx += 1;
-        if self.pattern_idx >= self.sequence_len {
-            self.pattern_idx = 0;
-        }
-        self.bpm = unsafe { read_u16(self.track, TRACK_BPM_OFFSET) };
-        self.speed = unsafe { read_u16(self.track, TRACK_SPEED_OFFSET) };
     }
 }
 

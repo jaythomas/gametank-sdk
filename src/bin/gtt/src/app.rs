@@ -13,8 +13,8 @@ use crate::{
     action::ComponentAction,
     component::Component,
     components::{
-        CommandPalette, ExportConfirmModal, FileBrowser, InstrumentEditor, QuitConfirmModal,
-        TrackerContainer, TuningEditor,
+        CommandPalette, ExportConfirmModal, FileBrowser, InstrumentEditor,
+        PatternDeleteConfirmModal, QuitConfirmModal, TrackerContainer, TuningEditor,
     },
     config::{GttConfig, build_key_assignments, config_to_tuning_keys},
     export,
@@ -34,6 +34,7 @@ pub struct App {
     file_browser: FileBrowser,
     quit_confirm: QuitConfirmModal,
     export_confirm: ExportConfirmModal,
+    pattern_delete_confirm: PatternDeleteConfirmModal,
     player: Option<Player>,
 }
 
@@ -69,6 +70,7 @@ impl App {
             file_browser,
             quit_confirm: QuitConfirmModal::init(),
             export_confirm: ExportConfirmModal::init(),
+            pattern_delete_confirm: PatternDeleteConfirmModal::init(),
             player,
         })
     }
@@ -79,7 +81,7 @@ impl App {
             self.file_data.instruments[i].name = name.clone();
         }
         self.file_data.bpm = self.tracker_container.get_bpm();
-        self.file_data.speed = self.tracker_container.get_fxspeed();
+        self.file_data.fx_speed = self.tracker_container.get_fx_speed();
         self.file_data.save(&self.input_path)
     }
 
@@ -98,14 +100,13 @@ impl App {
 
     fn run_export(&self, export_dir: &PathBuf) -> std::io::Result<()> {
         let bpm = self.tracker_container.get_bpm();
-        let speed = self.tracker_container.get_fxspeed();
-        let beats = self.tracker_container.get_beats();
+        let fx_speed = self.tracker_container.get_fx_speed();
         let stem = self
             .input_path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "track".to_string());
-        export::export_all(&self.file_data, bpm, speed, beats, &stem, export_dir)
+        export::export_all(&self.file_data, bpm, fx_speed, &stem, export_dir)
     }
 
     pub fn run(mut self) -> std::io::Result<()> {
@@ -124,6 +125,10 @@ impl App {
             {
                 let row = player.current_row() as u8;
                 self.tracker_container.set_current_row(row);
+                let pattern_idx = player.current_pattern() as u8;
+                if pattern_idx != self.tracker_container.pattern_idx() {
+                    self.tracker_container.set_pattern_idx(pattern_idx);
+                }
             }
 
             let events = poll_events();
@@ -132,6 +137,8 @@ impl App {
                 self.quit_confirm.update(events, &mut self.file_data)
             } else if self.export_confirm.visible {
                 self.export_confirm.update(events, &mut self.file_data)
+            } else if self.pattern_delete_confirm.visible {
+                self.pattern_delete_confirm.update(events, &mut self.file_data)
             } else if self.instrument_editor.visible {
                 self.instrument_editor.update(events, &mut self.file_data)
             } else if self.tuning_editor.visible {
@@ -172,6 +179,7 @@ impl App {
             let fb = &mut self.file_browser;
             let qc = &mut self.quit_confirm;
             let ec = &mut self.export_confirm;
+            let pdc = &mut self.pattern_delete_confirm;
             let file = &self.file_data;
             self.terminal.draw(|f| {
                 let area = f.area();
@@ -201,6 +209,9 @@ impl App {
                 }
                 if ec.visible {
                     ec.render(f, area, file);
+                }
+                if pdc.visible {
+                    pdc.render(f, area, file);
                 }
             })?;
         }
@@ -249,18 +260,17 @@ impl App {
                             self.tracker_container.set_playing(false);
                         } else {
                             let row = self.tracker_container.current_row() as usize;
-                            let pattern = self
-                                .file_data
-                                .current_pattern(self.tracker_container.pattern_idx())
-                                .clone();
-                            player.update_pattern(pattern);
+                            let pattern_idx = self.tracker_container.pattern_idx() as usize;
+                            let patterns = self.file_data.patterns.clone();
+                            let beats_list = self.file_data.pattern_beats.clone();
+                            player.update_patterns(patterns, beats_list);
                             for i in 0..NUM_INSTRUMENTS.min(8) {
                                 player.update_waveform(i, self.file_data.instrument_waveform(i));
                             }
                             player.update_tuning_notes(self.file_data.tuning.notes.clone());
                             player.set_bpm(self.tracker_container.get_bpm());
-                            player.set_speed(self.tracker_container.get_fxspeed());
-                            player.play(row);
+                            player.set_fx_speed(self.tracker_container.get_fx_speed());
+                            player.play(pattern_idx, row);
                             self.tracker_container.set_playing(true);
                         }
                     }
@@ -308,6 +318,66 @@ impl App {
                 }
                 ComponentAction::OpenQuitConfirm => {
                     self.quit_confirm.open();
+                }
+                ComponentAction::PatternPrev => {
+                    let idx = self.tracker_container.pattern_idx();
+                    if idx > 0 {
+                        self.tracker_container.set_pattern_idx(idx - 1);
+                    }
+                }
+                ComponentAction::PatternNext => {
+                    let idx = self.tracker_container.pattern_idx();
+                    let last = (self.file_data.patterns.len().max(1) - 1) as u8;
+                    if idx < last {
+                        self.tracker_container.set_pattern_idx(idx + 1);
+                    }
+                }
+                ComponentAction::PatternNew => {
+                    let idx = self.tracker_container.pattern_idx() as usize;
+                    let insert_at = (idx + 1).min(self.file_data.patterns.len());
+                    self.file_data
+                        .patterns
+                        .insert(insert_at, crate::tracker::empty_pattern());
+                    self.file_data.pattern_beats.insert(insert_at, 64);
+                    self.tracker_container.set_pattern_idx(insert_at as u8);
+                }
+                ComponentAction::PatternCopy => {
+                    let idx = self.tracker_container.pattern_idx() as usize;
+                    let copy = self.file_data.current_pattern(idx as u8).clone();
+                    let beats = self.file_data.beats_for(idx as u8);
+                    let insert_at = (idx + 1).min(self.file_data.patterns.len());
+                    self.file_data.patterns.insert(insert_at, copy);
+                    self.file_data.pattern_beats.insert(insert_at, beats);
+                    self.tracker_container.set_pattern_idx(insert_at as u8);
+                }
+                ComponentAction::OpenPatternDeleteConfirm => {
+                    if self.file_data.patterns.len() <= 1 {
+                        let idx = self.tracker_container.pattern_idx();
+                        *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
+                        self.file_data.set_beats_for(idx, 64);
+                    } else {
+                        self.pattern_delete_confirm.open();
+                    }
+                }
+                ComponentAction::PatternDelete => {
+                    let idx = self.tracker_container.pattern_idx() as usize;
+                    if self.file_data.patterns.len() <= 1 {
+                        self.file_data.patterns[0] = crate::tracker::empty_pattern();
+                        self.file_data.pattern_beats[0] = 64;
+                    } else if idx < self.file_data.patterns.len() {
+                        self.file_data.patterns.remove(idx);
+                        if idx < self.file_data.pattern_beats.len() {
+                            self.file_data.pattern_beats.remove(idx);
+                        }
+                        let new_last = (self.file_data.patterns.len() - 1) as u8;
+                        let new_idx = idx.min(new_last as usize) as u8;
+                        self.tracker_container.set_pattern_idx(new_idx);
+                    }
+                }
+                ComponentAction::PatternZap => {
+                    let idx = self.tracker_container.pattern_idx();
+                    *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
+                    self.file_data.set_beats_for(idx, 64);
                 }
                 ComponentAction::InstrumentSaved(idx, waveform) => {
                     self.file_data.instruments[idx].waveform = waveform.to_vec();

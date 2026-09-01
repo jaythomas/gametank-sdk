@@ -19,11 +19,11 @@ const AUDIO_CHANNELS: usize = 8;
 const CPU_FREQ: f64 = 3_579_545.0;
 
 pub enum PlayerCmd {
-    Play(usize),
+    Play(usize, usize),
     Pause,
     SetBpm(u16),
-    SetSpeed(u8),
-    UpdatePattern(Box<Pattern>),
+    SetFxSpeed(u8),
+    UpdatePatterns(Vec<Pattern>, Vec<u8>),
     UpdateWaveform(usize, Box<[u8; 256]>),
     UpdateTuningNotes(IndexMap<String, f64>),
     SetSampleRate(u8),
@@ -32,6 +32,7 @@ pub enum PlayerCmd {
 struct PlayerInner {
     cmd_rx: Receiver<PlayerCmd>,
     current_row_out: Arc<AtomicUsize>,
+    current_pattern_out: Arc<AtomicUsize>,
     is_playing_out: Arc<AtomicBool>,
 
     acp: W65C02S,
@@ -43,13 +44,16 @@ struct PlayerInner {
     output_sample_rate: f64,
     current_buffer: Option<[f32; 64]>,
     buffer_position: usize,
-    pattern: Box<Pattern>,
+    patterns: Vec<Pattern>,
+    pattern_beats_list: Vec<u8>,
+    current_pattern_idx: usize,
+    flow_count: u8,
     tuning_notes: IndexMap<String, f64>,
 
     playing: bool,
     current_row: usize,
     bpm: u16,
-    speed: u8,
+    fx_speed: u8,
     samples_per_beat: f64,
     samples_until_next_beat: f64,
     samples_per_tick: f64,
@@ -69,6 +73,7 @@ impl PlayerInner {
     fn new(
         cmd_rx: Receiver<PlayerCmd>,
         current_row_out: Arc<AtomicUsize>,
+        current_pattern_out: Arc<AtomicUsize>,
         is_playing_out: Arc<AtomicBool>,
         output_sample_rate: f64,
         output_channels: usize,
@@ -90,12 +95,13 @@ impl PlayerInner {
         let audio_out = GameTankAudio::new(acp_sample_rate, output_sample_rate);
 
         let samples_per_beat = output_sample_rate * 60.0 / (bpm.max(1) as f64);
-        let speed: u8 = 6;
-        let samples_per_tick = samples_per_beat / speed.max(1) as f64;
+        let fx_speed: u8 = 6;
+        let samples_per_tick = samples_per_beat / fx_speed.max(1) as f64;
 
         Self {
             cmd_rx,
             current_row_out,
+            current_pattern_out,
             is_playing_out,
             acp,
             acp_bus,
@@ -105,12 +111,15 @@ impl PlayerInner {
             output_sample_rate,
             current_buffer: None,
             buffer_position: 0,
-            pattern: Box::new(empty_pattern()),
+            patterns: vec![empty_pattern()],
+            pattern_beats_list: vec![ROWS_PER_PATTERN as u8],
+            current_pattern_idx: 0,
+            flow_count: 0,
             tuning_notes: IndexMap::new(),
             playing: false,
             current_row: 0,
             bpm,
-            speed,
+            fx_speed,
             samples_per_beat,
             samples_until_next_beat: samples_per_beat,
             samples_per_tick,
@@ -128,24 +137,37 @@ impl PlayerInner {
     }
 
     fn recompute_tick_timing(&mut self) {
-        self.samples_per_tick = self.samples_per_beat / self.speed.max(1) as f64;
+        self.samples_per_tick = self.samples_per_beat / self.fx_speed.max(1) as f64;
+    }
+
+    fn pattern_beats(&self, pattern_idx: usize) -> usize {
+        self.pattern_beats_list
+            .get(pattern_idx)
+            .copied()
+            .unwrap_or(ROWS_PER_PATTERN as u8)
+            .clamp(1, ROWS_PER_PATTERN as u8) as usize
     }
 
     fn process_commands(&mut self) {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             match cmd {
-                PlayerCmd::Play(row) => {
+                PlayerCmd::Play(pattern_idx, row) => {
                     self.playing = true;
+                    self.current_pattern_idx =
+                        pattern_idx.min(self.patterns.len().saturating_sub(1));
                     self.current_row = row;
+                    self.flow_count = 0;
                     self.samples_until_next_beat = self.samples_per_beat;
                     self.samples_until_next_tick = self.samples_per_tick;
                     self.tick_count = 0;
-                    self.rebuild_channel_state(row);
+                    self.rebuild_channel_state(self.current_pattern_idx, row);
                     for ch in 0..AUDIO_CHANNELS {
                         self.set_voice_volume(ch, if self.muted[ch] { 0 } else { self.remembered_vol[ch] });
                     }
                     self.trigger_row();
-                    self.current_row_out.store(row, Ordering::Relaxed);
+                    self.current_row_out.store(self.current_row, Ordering::Relaxed);
+                    self.current_pattern_out
+                        .store(self.current_pattern_idx, Ordering::Relaxed);
                     self.is_playing_out.store(true, Ordering::Relaxed);
                 }
                 PlayerCmd::Pause => {
@@ -164,12 +186,18 @@ impl PlayerInner {
                     self.samples_per_beat = self.output_sample_rate * 60.0 / (bpm.max(1) as f64);
                     self.recompute_tick_timing();
                 }
-                PlayerCmd::SetSpeed(speed) => {
-                    self.speed = speed;
+                PlayerCmd::SetFxSpeed(fx_speed) => {
+                    self.fx_speed = fx_speed;
                     self.recompute_tick_timing();
                 }
-                PlayerCmd::UpdatePattern(pat) => {
-                    self.pattern = pat;
+                PlayerCmd::UpdatePatterns(patterns, beats_list) => {
+                    if !patterns.is_empty() {
+                        self.patterns = patterns;
+                        self.pattern_beats_list = beats_list;
+                        if self.current_pattern_idx >= self.patterns.len() {
+                            self.current_pattern_idx = self.patterns.len() - 1;
+                        }
+                    }
                 }
                 PlayerCmd::UpdateWaveform(idx, wf) => {
                     if idx < AUDIO_CHANNELS {
@@ -229,14 +257,14 @@ impl PlayerInner {
         }
     }
 
-    fn rebuild_channel_state(&mut self, row: usize) {
+    fn rebuild_channel_state(&mut self, pattern_idx: usize, row: usize) {
         for ch in 0..AUDIO_CHANNELS {
             let mut vol = 0u8;
             let mut muted = true;
             let mut note_name: Option<String> = None;
             let mut base_freq: u16 = 0;
             for r in 0..row {
-                let beat = &self.pattern[ch + 1][r];
+                let beat = &self.patterns[pattern_idx][ch + 1][r];
                 for cmd in &beat.cmd_list {
                     match cmd {
                         ChannelCmd::Volume(v) => {
@@ -267,11 +295,14 @@ impl PlayerInner {
         }
 
         for r in 0..row {
-            if let Some(sqc) = &self.pattern[0][r].sqc {
+            if let Some(sqc) = &self.patterns[pattern_idx][0][r].sqc {
                 match sqc {
                     SequencerCmd::Tempo(bpm) => self.bpm = *bpm as u16,
-                    SequencerCmd::Speed(speed) => self.speed = *speed,
-                    SequencerCmd::Stop => {}
+                    SequencerCmd::FxSpeed(fx_speed) => self.fx_speed = *fx_speed,
+                    SequencerCmd::Stop
+                    | SequencerCmd::FlowCount(_)
+                    | SequencerCmd::CountJump(_, _) => {}
+                    | SequencerCmd::Jump(_, _) => {}
                 }
             }
         }
@@ -279,34 +310,71 @@ impl PlayerInner {
         self.recompute_tick_timing();
     }
 
+    // Process sequencer command and channel commands for the current row
     fn trigger_row(&mut self) {
-        let row = self.current_row;
+        loop {
+            let pattern_idx = self.current_pattern_idx;
+            let row = self.current_row;
 
-        if let Some(sqc) = self.pattern[0][row].sqc.clone() {
-            match sqc {
-                SequencerCmd::Stop => {
-                    self.playing = false;
-                    self.is_playing_out.store(false, Ordering::Relaxed);
-                    for ch in 0..AUDIO_CHANNELS {
-                        self.set_voice_volume(ch, 0);
+            if let Some(sqc) = self.patterns[pattern_idx][0][row].sqc.clone() {
+                match sqc {
+                    SequencerCmd::Stop => {
+                        self.playing = false;
+                        self.is_playing_out.store(false, Ordering::Relaxed);
+                        for ch in 0..AUDIO_CHANNELS {
+                            self.set_voice_volume(ch, 0);
+                        }
+                        return;
                     }
-                    return;
-                }
-                SequencerCmd::Tempo(bpm) => {
-                    self.bpm = bpm as u16;
-                    self.samples_per_beat =
-                        self.output_sample_rate * 60.0 / (self.bpm.max(1) as f64);
-                    self.recompute_tick_timing();
-                }
-                SequencerCmd::Speed(speed) => {
-                    self.speed = speed;
-                    self.recompute_tick_timing();
+                    SequencerCmd::Tempo(bpm) => {
+                        self.bpm = bpm as u16;
+                        self.samples_per_beat =
+                            self.output_sample_rate * 60.0 / (self.bpm.max(1) as f64);
+                        self.recompute_tick_timing();
+                    }
+                    SequencerCmd::FxSpeed(fx_speed) => {
+                        self.fx_speed = fx_speed;
+                        self.recompute_tick_timing();
+                    }
+                    SequencerCmd::FlowCount(count) => {
+                        self.flow_count = count;
+                    }
+                    SequencerCmd::CountJump(pat, beat) => {
+                        if self.flow_count > 0 {
+                            self.flow_count -= 1;
+                            let target_pattern = (pat as usize).min(self.patterns.len() - 1);
+                            let target_beat =
+                                (beat as usize).min(self.pattern_beats(target_pattern) - 1);
+                            self.current_pattern_idx = target_pattern;
+                            self.current_row = target_beat;
+                            self.current_pattern_out
+                                .store(target_pattern, Ordering::Relaxed);
+                            self.current_row_out.store(target_beat, Ordering::Relaxed);
+                            continue;
+                        }
+                    }
+                    SequencerCmd::Jump(pat, beat) => {
+                        let target_pattern = (pat as usize).min(self.patterns.len() - 1);
+                        let target_beat =
+                            (beat as usize).min(self.pattern_beats(target_pattern) - 1);
+                        self.current_pattern_idx = target_pattern;
+                        self.current_row = target_beat;
+                        self.current_pattern_out
+                            .store(target_pattern, Ordering::Relaxed);
+                        self.current_row_out.store(target_beat, Ordering::Relaxed);
+                        continue;
+                    }
                 }
             }
-        }
 
+            self.trigger_channels(pattern_idx, row);
+            return;
+        }
+    }
+
+    fn trigger_channels(&mut self, pattern_idx: usize, row: usize) {
         for ch in 0..AUDIO_CHANNELS {
-            let beat = &self.pattern[ch + 1][row];
+            let beat = &self.patterns[pattern_idx][ch + 1][row];
             let maybe_note = beat.cmd_list.iter().find_map(|c| match c {
                 ChannelCmd::Note(s) => Some(s.clone()),
                 _ => None,
@@ -446,12 +514,15 @@ impl PlayerInner {
             self.samples_until_next_beat -= 1.0;
             if self.samples_until_next_beat <= 0.0 {
                 self.samples_until_next_beat += self.samples_per_beat;
-                self.current_row = (self.current_row + 1) % ROWS_PER_PATTERN;
+                let beats = self.pattern_beats(self.current_pattern_idx);
+                self.current_row = (self.current_row + 1) % beats.max(1);
                 self.samples_until_next_tick = self.samples_per_tick.max(1.0);
                 self.tick_count = 0;
                 self.trigger_row();
                 self.current_row_out
                     .store(self.current_row, Ordering::Relaxed);
+                self.current_pattern_out
+                    .store(self.current_pattern_idx, Ordering::Relaxed);
             }
 
             if self.current_buffer.is_none() || self.buffer_position >= 64 {
@@ -493,6 +564,7 @@ impl PlayerInner {
 pub struct Player {
     cmd_tx: Sender<PlayerCmd>,
     current_row: Arc<AtomicUsize>,
+    current_pattern: Arc<AtomicUsize>,
     is_playing: Arc<AtomicBool>,
     _stream: cpal::Stream,
 }
@@ -508,11 +580,13 @@ impl Player {
 
         let (cmd_tx, cmd_rx) = unbounded::<PlayerCmd>();
         let current_row = Arc::new(AtomicUsize::new(0));
+        let current_pattern = Arc::new(AtomicUsize::new(0));
         let is_playing = Arc::new(AtomicBool::new(false));
 
         let mut inner = PlayerInner::new(
             cmd_rx,
             current_row.clone(),
+            current_pattern.clone(),
             is_playing.clone(),
             output_sample_rate,
             output_channels,
@@ -536,13 +610,14 @@ impl Player {
         Some(Player {
             cmd_tx,
             current_row,
+            current_pattern,
             is_playing,
             _stream: stream,
         })
     }
 
-    pub fn play(&self, row: usize) {
-        let _ = self.cmd_tx.send(PlayerCmd::Play(row));
+    pub fn play(&self, pattern_idx: usize, row: usize) {
+        let _ = self.cmd_tx.send(PlayerCmd::Play(pattern_idx, row));
     }
 
     pub fn pause(&self) {
@@ -557,18 +632,22 @@ impl Player {
         self.current_row.load(Ordering::Relaxed)
     }
 
+    pub fn current_pattern(&self) -> usize {
+        self.current_pattern.load(Ordering::Relaxed)
+    }
+
     pub fn set_bpm(&self, bpm: u16) {
         let _ = self.cmd_tx.send(PlayerCmd::SetBpm(bpm));
     }
 
-    pub fn set_speed(&self, speed: u8) {
-        let _ = self.cmd_tx.send(PlayerCmd::SetSpeed(speed));
+    pub fn set_fx_speed(&self, fx_speed: u8) {
+        let _ = self.cmd_tx.send(PlayerCmd::SetFxSpeed(fx_speed));
     }
 
-    pub fn update_pattern(&self, pattern: Pattern) {
+    pub fn update_patterns(&self, patterns: Vec<Pattern>, beats_list: Vec<u8>) {
         let _ = self
             .cmd_tx
-            .send(PlayerCmd::UpdatePattern(Box::new(pattern)));
+            .send(PlayerCmd::UpdatePatterns(patterns, beats_list));
     }
 
     pub fn update_waveform(&self, idx: usize, waveform: [u8; 256]) {

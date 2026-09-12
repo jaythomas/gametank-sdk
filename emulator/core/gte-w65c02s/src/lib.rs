@@ -124,9 +124,19 @@ mod instructions;
 
 use addressing_modes::*;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum OpcodeCycleProfile {
+    Reference,
+    Optimized,
+}
+
+impl Default for OpcodeCycleProfile {
+    fn default() -> Self { OpcodeCycleProfile::Reference }
+}
+
 // How many cycles each opcode takes to run. See:
 // https://6502.org/tutorials/65c02opcodes.html
-pub static OPCODE_CYCLES: [i32; 256] = [
+pub static REFERENCE_OPCODE_CYCLES: [i32; 256] = [
     7, 6, 2, 1, 5, 3, 5, 5, 3, 2, 2, 1, 6, 4, 6, 5,
     2, 5, 5, 1, 5, 4, 6, 5, 2, 4, 2, 1, 6, 4, 6, 5,
     6, 6, 2, 1, 3, 3, 5, 5, 4, 2, 2, 1, 4, 4, 6, 5,
@@ -143,6 +153,25 @@ pub static OPCODE_CYCLES: [i32; 256] = [
     2, 3, 5, 1, 4, 4, 6, 5, 2, 4, 3, 3, 4, 4, 7, 5,
     2, 6, 2, 1, 3, 3, 5, 5, 2, 2, 2, 1, 4, 4, 6, 5,
     2, 5, 5, 1, 4, 4, 6, 5, 2, 4, 4, 1, 4, 4, 7, 5,
+];
+
+pub static OPTIMIZED_OPCODE_CYCLES: [i32; 256]= [ // was this worst case or...? who knows, who cares
+    7, 6, 2, 0, 5, 3, 5, 5, 2, 3, 4, 0, 7, 5, 7, 7,
+    3, 5, 5, 0, 5, 4, 6, 5, 1, 5, 4, 0, 7, 5, 7, 7,
+    6, 6, 2, 0, 3, 3, 5, 5, 3, 3, 4, 0, 5, 5, 7, 7,
+    2, 5, 5, 0, 4, 4, 6, 5, 1, 5, 4, 0, 5, 5, 7, 7,
+    5, 6, 2, 0, 2, 3, 5, 5, 2, 3, 4, 0, 4, 5, 7, 7,
+    3, 5, 5, 0, 3, 4, 6, 5, 1, 5, 2, 0, 9, 5, 7, 7,
+    5, 6, 2, 0, 3, 3, 5, 5, 3, 3, 4, 0, 7, 5, 7, 7,
+    2, 5, 5, 0, 4, 4, 6, 5, 1, 5, 2, 0, 7, 5, 7, 7,
+    3, 5, 2, 0, 3, 2, 3, 5, 4, 3, 1, 0, 5, 5, 5, 6,
+    3, 5, 4, 0, 4, 3, 4, 5, 1, 5, 1, 0, 5, 5, 6, 6,
+    3, 6, 3, 0, 3, 3, 3, 5, 1, 2, 1, 0, 5, 5, 5, 6,
+    2, 5, 5, 0, 4, 4, 4, 5, 1, 5, 1, 0, 5, 5, 5, 6,
+    3, 6, 2, 0, 3, 3, 5, 5, 4, 3, 4, 0, 5, 5, 7, 6,
+    3, 5, 5, 0, 3, 4, 6, 5, 1, 5, 2, 1, 4, 5, 8, 6,
+    3, 6, 2, 0, 3, 3, 5, 5, 4, 3, 1, 0, 5, 5, 7, 6,
+    2, 5, 5, 0, 3, 4, 6, 5, 1, 6, 3, 0, 4, 6, 8, 6,
 ];
 
 /// Implements a system connected to a W65C02S's bus. Only `read` and `write`
@@ -262,6 +291,7 @@ pub struct W65C02S {
     a: u8, x: u8, y: u8, s: u8, p: u8,
     irq: bool, irq_pending: bool,
     nmi: bool, nmi_edge: bool, nmi_pending: bool,
+    cycle_profile: OpcodeCycleProfile,
 }
 
 impl W65C02S {
@@ -279,8 +309,13 @@ impl W65C02S {
             p: P_1|P_I,
             irq: false, irq_pending: false,
             nmi: false, nmi_edge: false, nmi_pending: false,
+            cycle_profile: OpcodeCycleProfile::Reference,
         }
     }
+    #[inline(always)]
+    pub fn get_cycle_profile(&self) -> OpcodeCycleProfile { self.cycle_profile }
+    #[inline(always)]
+    pub fn set_cycle_profile(&mut self, profile: OpcodeCycleProfile) { self.cycle_profile = profile }
     /// Resets the CPU. Execution will flounder for a few cycles, then fetch
     /// the reset vector and "start over".
     #[inline(always)]
@@ -747,7 +782,11 @@ impl W65C02S {
                         0xFF => self.bbs::<_, RelativeBitBranch, S>(system, 0x80),
                     }
 
-                    return OPCODE_CYCLES[opcode as usize];
+                    let table = match self.cycle_profile {
+                        OpcodeCycleProfile::Reference => &REFERENCE_OPCODE_CYCLES,
+                        OpcodeCycleProfile::Optimized => &OPTIMIZED_OPCODE_CYCLES,
+                    };
+                    return table[opcode as usize];
                 }
             },
         }

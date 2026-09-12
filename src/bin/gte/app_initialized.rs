@@ -2,7 +2,7 @@ use std::cell::{Cell, OnceCell};
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
-use egui::{epaint, vec2, Align, Button, Color32, Frame, Id, LayerId, Layout, Pos2, Rect, ResizeDirection, ScrollArea, TextureOptions, Ui, UiBuilder, Vec2, ViewportCommand};
+use egui::{epaint, vec2, Align, Align2, Button, Color32, Frame, Id, LayerId, Layout, Pos2, Rect, ResizeDirection, ScrollArea, TextureOptions, Ui, UiBuilder, Vec2, ViewportCommand};
 use egui_wgpu::ScreenDescriptor;
 use klingt::Klingt;
 use tracing::{error, info, warn};
@@ -37,6 +37,9 @@ pub struct AppInitialized {
     show_left_pane: bool,
     show_right_pane: bool,
     show_bottom_pane: bool,
+
+    toast_message: Option<String>,
+    toast_until: Option<std::time::Instant>,
 
     audio: Option<GameTankAudio>,
 }
@@ -93,6 +96,8 @@ impl From<&mut App> for AppInitialized {
             show_left_pane: false,
             show_right_pane: false,
             show_bottom_pane: false,
+            toast_message: None,
+            toast_until: None,
             audio: audio_bridge,
         }
     }
@@ -187,6 +192,24 @@ impl AppInitialized {
             });
         }
 
+        if let Some(until) = self.toast_until {
+            if std::time::Instant::now() < until {
+                if let Some(message) = &self.toast_message {
+                    egui::Area::new(Id::new("toast"))
+                        .anchor(Align2::RIGHT_BOTTOM, vec2(-8.0, -8.0))
+                        .show(self.egui_renderer.context(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.label(message);
+                            });
+                        });
+                }
+                self.window.request_redraw();
+            } else {
+                self.toast_message = None;
+                self.toast_until = None;
+            }
+        }
+
         egui::CentralPanel::default().frame(frame).show(self.egui_renderer.context(), |ui| {
             // Set the minimum size for the center pane
             let center_min_size = egui::vec2(128.0, 128.0);
@@ -241,7 +264,7 @@ use gte_core::inputs::InputCommand::Controller1;
 use wasm_bindgen::prelude::*;
 use winit::event::ElementState::Pressed;
 use winit::keyboard;
-use winit::keyboard::NamedKey::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Enter};
+use winit::keyboard::NamedKey::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Enter, F6};
 use winit::keyboard::SmolStr;
 use crate::app_delegation::InstantClock;
 
@@ -322,7 +345,20 @@ impl ApplicationHandler for AppInitialized {
                 self.handle_resized(new_size.width, new_size.height);
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let KeyEvent {  logical_key,   state,  .. } = event;
+                let KeyEvent {  logical_key,   state, repeat,  .. } = event;
+                if logical_key == keyboard::Key::Named(F6) && state == Pressed && !repeat {
+                    let next_profile = match self.emulator.opcode_cycle_profile() {
+                        gte_w65c02s::OpcodeCycleProfile::Reference => gte_w65c02s::OpcodeCycleProfile::Optimized,
+                        gte_w65c02s::OpcodeCycleProfile::Optimized => gte_w65c02s::OpcodeCycleProfile::Reference,
+                    };
+                    self.emulator.set_opcode_cycle_profile(next_profile);
+                    let message = match next_profile {
+                        gte_w65c02s::OpcodeCycleProfile::Reference => "reference opcode profile loaded",
+                        gte_w65c02s::OpcodeCycleProfile::Optimized => "optimized opcode profile loaded",
+                    };
+                    self.toast_message = Some(message.to_string());
+                    self.toast_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                }
                 if let Some(cmd) = self.input_bindings.get(&logical_key).copied() {
                     if let Some(ks) = self.emulator.input_state.get(&cmd) {
                         self.emulator.set_input_state(cmd, ks.update_state(state==Pressed))

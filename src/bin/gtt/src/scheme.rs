@@ -84,14 +84,6 @@ impl Scheme {
             Some(false) => self.black[0],
         }
     }
-
-    pub fn reduced_text_color(&self, color: Color) -> Color {
-        match self.rate_text_color(color) {
-            None => Color::Reset,
-            Some(true) => self.white[0],
-            Some(false) => self.black[3],
-        }
-    }
 }
 
 pub const SCHEME: Scheme = Scheme {

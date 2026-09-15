@@ -6,7 +6,6 @@ mod components;
 mod config;
 mod export;
 mod file;
-mod focus_cursor;
 mod lane;
 mod player;
 mod scheme;

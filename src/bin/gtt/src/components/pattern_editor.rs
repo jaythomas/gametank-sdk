@@ -247,7 +247,6 @@ pub enum CellStyle {
     OddRow,
     SelectedRow,
     SelectedCell,
-    Bar,
 }
 
 pub enum CellDisplay {
@@ -255,7 +254,7 @@ pub enum CellDisplay {
     SeqCmds(Option<SequencerCmd>),
     Note(NoteCell),
     Vol(Option<u8>),
-    Fx(Option<(u8, u8, u8)>),
+    Fx(Option<(u8, u8, Option<u8>)>),
 }
 
 pub enum NoteCell {
@@ -292,7 +291,7 @@ impl CellDisplay {
             },
             CellDisplay::Fx(fx) => match fx {
                 None => "---".to_string(),
-                Some((id, x, y)) => format!("{:01X}{:01X}{:01X}", id, x, y),
+                Some((id, x, y)) => format!("{:01X}{:01X}{}", id, x, y.map(|y| format!("{:01X}", y)).unwrap_or_else(|| "-".to_string())),
             },
         }
     }
@@ -347,7 +346,6 @@ impl CellDisplay {
                     Modifier::SLOW_BLINK | Modifier::REVERSED,
                 )
             }
-            CellStyle::Bar => todo!(),
         };
 
         let style = style.bg(row_bg).add_modifier(add_modifiers);
@@ -634,10 +632,10 @@ impl Component for PatternEditor {
                                             ChannelCmd::Arpeggio(x, y) => Some((1u8, *x, *y)),
                                             _ => None,
                                         })
-                                        .unwrap_or((0, 0, 0));
+                                        .unwrap_or((0, 0, None));
                                     (id, x, y, n)
                                 }
-                                _ => (0, 0, 0, 0),
+                                _ => (0, 0, None, 0),
                             };
 
                         match digits_typed {
@@ -648,7 +646,7 @@ impl Component for PatternEditor {
                                 fx_id = digit;
                             }
                             1 => fx_x = digit,
-                            _ => fx_y = digit,
+                            _ => fx_y = Some(digit),
                         }
                         let digits_typed = (digits_typed + 1).min(3);
                         self.fx_edit = Some((cell, digits_typed));
@@ -678,21 +676,21 @@ impl Component for PatternEditor {
 
                             let (fx_id, fx_x, fx_y) = if remaining == 0 {
                                 self.fx_edit = None;
-                                (0, 0, 0)
+                                (0, 0, None)
                             } else {
                                 self.fx_edit = Some((cell, remaining));
                                 let pattern = file.current_pattern(self.pattern_idx);
-                                let (id, x, y) = pattern[channel + 1][row]
+                                let (id, x, _y) = pattern[channel + 1][row]
                                     .cmd_list
                                     .iter()
                                     .find_map(|c| match c {
                                         ChannelCmd::Arpeggio(x, y) => Some((1u8, *x, *y)),
                                         _ => None,
                                     })
-                                    .unwrap_or((0, 0, 0));
+                                    .unwrap_or((0, 0, None));
                                 match remaining {
-                                    2 => (id, x, 0),
-                                    _ => (id, 0, 0),
+                                    2 => (id, x, None),
+                                    _ => (id, 0, None),
                                 }
                             };
 

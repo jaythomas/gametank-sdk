@@ -34,7 +34,7 @@ pub enum ChannelCmd {
     Note(String),
     NoteOff,
     Phase(u16),
-    Arpeggio(u8, u8),
+    Arpeggio(u8, Option<u8>),
     // SlidePitch(u8, i16),
     // SlideVol(u8, i16),
     // StopPSlide,

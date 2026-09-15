@@ -14,6 +14,7 @@ const VOL_NO_CHANGE: u8 = 0xFF;
 // Fx cell encoding
 const FX_NONE: u8 = 0;
 const FX_ARPEGGIO: u8 = 1;
+const ARP_NO_THIRD_NOTE: u8 = 0xFF;
 
 fn note_to_freq_inc(hz: f64, sample_rate_hz: f64) -> u16 {
     ((hz / sample_rate_hz) * 65536.0).round().min(65535.0) as u16
@@ -93,7 +94,7 @@ fn bake_pattern(
                     ChannelCmd::Arpeggio(x, y) => {
                         fx_id = FX_ARPEGGIO;
                         fx_x = *x;
-                        fx_y = *y;
+                        fx_y = y.unwrap_or(ARP_NO_THIRD_NOTE);
                     }
                     _ => {}
                 }
@@ -118,7 +119,9 @@ fn bake_pattern(
                 && let Some(name) = &cur_note_name
             {
                 arp_x_freq = arp_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(0);
-                arp_y_freq = arp_offset_freq_inc(file, name, fx_y, sample_rate_hz).unwrap_or(0);
+                if fx_y != ARP_NO_THIRD_NOTE {
+                    arp_y_freq = arp_offset_freq_inc(file, name, fx_y, sample_rate_hz).unwrap_or(0);
+                }
             }
 
             let base = 1 + ch * channel_stride;
@@ -168,7 +171,7 @@ fn write_wave_asm(file: &TrackerFile, dir: &Path) -> io::Result<()> {
         writeln!(s, ".align 256").unwrap();
         writeln!(s, ".global instrument{}_table", i + 1).unwrap();
         writeln!(s, "instrument{}_table:", i + 1).unwrap();
-        writeln!(s, "    .incbin \"./instruments/{}.raw\"", name).unwrap();
+        writeln!(s, "    .incbin \"./src/asm/instruments/{}.raw\"", name).unwrap();
     }
     std::fs::write(dir.join("wave.asm"), s)
 }
@@ -277,3 +280,4 @@ pub fn export_all(
 
     Ok(())
 }
+

@@ -1,4 +1,4 @@
-use super::wavetable_8ch::{VOICE_COUNT, WAVETABLE, voices};
+use super::wavetable_8ch::{voices, VOICE_COUNT, WAVETABLE};
 
 // Number of parallel per-beat arrays packed into each channel's slice of a
 // pattern's data block:
@@ -16,6 +16,7 @@ const CHANNEL_ARRAYS: usize = 10;
 
 // fx_id value for the Arpeggio effect
 const FX_ARPEGGIO: u8 = 1;
+const ARP_NO_THIRD_NOTE: u8 = 0xFF;
 
 /// Drives the 8-channel wavetable synth from a gt-tracker export. Create one
 /// sequencer per track, point it at the `<name>_track` descriptor, then call
@@ -37,13 +38,13 @@ pub struct TrackSequencer {
     beat: u8,
     frame_acc: u16,
     tick_acc: u16,
-    tick_count: u8,
     bpm: u16,
     speed: u16,
     pattern_idx: u8,
     pattern_count: u8,
     flow_count: u8,
     stopped: bool,
+    arp_active_any: bool,
 }
 
 // Channel base note pitch, written by `advance_beat`. This is different than the active
@@ -53,6 +54,10 @@ static mut BASE_FREQ: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
 static mut ARP_ACTIVE: [bool; VOICE_COUNT] = [false; VOICE_COUNT];
 static mut ARP_X_FREQ: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
 static mut ARP_Y_FREQ: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
+// Keep track if the channel has a 2-note or 3-note arpeggio
+static mut ARP_STEP_COUNT: [u8; VOICE_COUNT] = [3; VOICE_COUNT];
+// Each channel's current position within its own arpeggio cycle
+static mut ARP_STEP: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
 
 // See the gt-tracker README for the track descriptor layout
 const TRACK_BPM_OFFSET: usize = 0;
@@ -79,13 +84,13 @@ impl TrackSequencer {
             beat: 0,
             frame_acc: 0,
             tick_acc: 0,
-            tick_count: 0,
             bpm,
             speed,
             pattern_idx: 0,
             pattern_count,
             flow_count: 0,
             stopped: false,
+            arp_active_any: false,
         }
     }
 
@@ -105,22 +110,24 @@ impl TrackSequencer {
         }
 
         self.frame_acc += self.bpm;
-        let mut remaining = self.speed;
-        while remaining > 0 {
-            // read_volatile prevents LLVM from trying to optimize this into an unsupported `__mulhi3`
-            let bpm = unsafe { core::ptr::read_volatile(&self.bpm) };
-            self.tick_acc += bpm;
-            remaining -= 1;
-        }
 
-        while self.tick_acc >= 3600 {
-            self.tick_acc -= 3600;
-            self.advance_tick();
+        if self.arp_active_any {
+            let mut remaining = self.speed;
+            while remaining > 0 {
+                // read_volatile prevents LLVM from trying to optimize this into an unsupported `__mulhi3`
+                let bpm = unsafe { core::ptr::read_volatile(&self.bpm) };
+                self.tick_acc += bpm;
+                remaining -= 1;
+            }
+
+            while self.tick_acc >= 3600 {
+                self.tick_acc -= 3600;
+                self.advance_tick();
+            }
         }
 
         if self.frame_acc >= 3600 {
             self.frame_acc -= 3600;
-            self.tick_acc = 0;
             self.advance_beat();
         }
     }
@@ -128,25 +135,24 @@ impl TrackSequencer {
     // Run sub-tick effect
     fn advance_tick(&mut self) {
         let v = voices();
-        let step = self.tick_count;
         unsafe {
             for ch in 0..VOICE_COUNT {
                 if !ARP_ACTIVE[ch] {
                     continue;
                 }
-                let freq = match step {
+                let freq = match ARP_STEP[ch] {
                     0 => BASE_FREQ[ch],
                     1 => ARP_X_FREQ[ch],
                     _ => ARP_Y_FREQ[ch],
                 };
                 v[ch].set_frequency(freq);
+                ARP_STEP[ch] = if ARP_STEP[ch] + 1 >= ARP_STEP_COUNT[ch] {
+                    0
+                } else {
+                    ARP_STEP[ch] + 1
+                };
             }
         }
-        self.tick_count = if self.tick_count >= 2 {
-            0
-        } else {
-            self.tick_count + 1
-        };
     }
 
     fn pattern_ptr(&self, pattern_idx: u8) -> *const u8 {
@@ -213,7 +219,6 @@ impl TrackSequencer {
             }
 
             self.trigger_channels(data, channel_stride, pattern_beats, beat);
-            self.tick_count = 0;
 
             self.beat += 1;
             if (self.beat as usize) >= pattern_beats {
@@ -243,11 +248,13 @@ impl TrackSequencer {
 
         let v = voices();
         let mut base = 0usize;
+        let mut any_active = false;
         for ch in 0..VOICE_COUNT {
             let lo = unsafe { *data.add(base + off_freq_lo + beat) } as u16;
             let hi = unsafe { *data.add(base + off_freq_hi + beat) } as u16;
             let vol = unsafe { *data.add(base + off_vol + beat) };
             let fx_id = unsafe { *data.add(base + off_fx_id + beat) };
+            let fx_y = unsafe { *data.add(base + off_fx_y + beat) };
 
             if lo | hi != 0 {
                 unsafe {
@@ -267,7 +274,10 @@ impl TrackSequencer {
                     ARP_ACTIVE[ch] = true;
                     ARP_X_FREQ[ch] = arp_x_lo | (arp_x_hi << 8);
                     ARP_Y_FREQ[ch] = arp_y_lo | (arp_y_hi << 8);
+                    ARP_STEP_COUNT[ch] = if fx_y == ARP_NO_THIRD_NOTE { 2 } else { 3 };
+                    ARP_STEP[ch] = 0;
                 }
+                any_active = true;
             } else {
                 unsafe {
                     ARP_ACTIVE[ch] = false;
@@ -276,6 +286,7 @@ impl TrackSequencer {
             }
             base += channel_stride;
         }
+        self.arp_active_any = any_active;
     }
 }
 

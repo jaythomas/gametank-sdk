@@ -1,4 +1,4 @@
-use std::{path::PathBuf, thread::sleep, time::Duration};
+use std::{path::{Path, PathBuf}, thread::sleep, time::Duration};
 
 use ratatui::{
     DefaultTerminal,
@@ -98,7 +98,7 @@ impl App {
         parent.join(format!("{}-export", stem))
     }
 
-    fn run_export(&self, export_dir: &PathBuf) -> std::io::Result<()> {
+    fn run_export(&self, export_dir: &Path) -> std::io::Result<()> {
         let bpm = self.tracker_container.get_bpm();
         let fx_speed = self.tracker_container.get_fx_speed();
         let stem = self
@@ -234,7 +234,7 @@ impl App {
                         self.export_confirm.open(export_dir);
                     } else {
                         let export_dir = export_dir.clone();
-                        if let Err(_) = self.run_export(&export_dir) {
+                        if self.run_export(&export_dir).is_err() {
                             self.export_confirm.open_error(export_dir);
                         } else {
                             self.tracker_container.mark_export_success();

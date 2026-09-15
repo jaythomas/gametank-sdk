@@ -6,7 +6,7 @@ use std::sync::{
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gte_acp::{ARAM, AcpBus, audio_output::GameTankAudio};
-use gte_w65c02s::{System, W65C02S};
+use gte_w65c02s::W65C02S;
 use indexmap::IndexMap;
 
 use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
@@ -66,6 +66,8 @@ struct PlayerInner {
     arp_active: [bool; AUDIO_CHANNELS],
     arp_x_freq: [u16; AUDIO_CHANNELS],
     arp_y_freq: [u16; AUDIO_CHANNELS],
+    arp_step_count: [u8; AUDIO_CHANNELS],
+    arp_step: [u8; AUDIO_CHANNELS],
     cur_note_name: [Option<String>; AUDIO_CHANNELS],
 }
 
@@ -88,8 +90,10 @@ impl PlayerInner {
         let mut acp = W65C02S::new();
         acp.reset();
 
-        let mut acp_bus = AcpBus::default();
-        acp_bus.irq_counter = (sample_rate_reg as i32) * 4;
+        let acp_bus = AcpBus {
+            irq_counter: (sample_rate_reg as i32) * 4,
+            ..Default::default()
+        };
 
         let acp_sample_rate = CPU_FREQ / sample_rate_reg as f64;
         let audio_out = GameTankAudio::new(acp_sample_rate, output_sample_rate);
@@ -132,6 +136,8 @@ impl PlayerInner {
             arp_active: [false; AUDIO_CHANNELS],
             arp_x_freq: [0; AUDIO_CHANNELS],
             arp_y_freq: [0; AUDIO_CHANNELS],
+            arp_step_count: [3; AUDIO_CHANNELS],
+            arp_step: [0; AUDIO_CHANNELS],
             cur_note_name: std::array::from_fn(|_| None),
         }
     }
@@ -222,9 +228,7 @@ impl PlayerInner {
         let base = 0x0400 + (idx * 0x100);
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
-            for i in 0..256 {
-                (*aram_ptr)[base + i] = waveform[i];
-            }
+            (&mut (*aram_ptr))[base..base + 256].copy_from_slice(waveform);
         }
     }
 
@@ -421,9 +425,15 @@ impl PlayerInner {
                     self.arp_x_freq[ch] = self
                         .arp_offset_freq(note_name, x)
                         .unwrap_or(self.base_freq[ch]);
-                    self.arp_y_freq[ch] = self
-                        .arp_offset_freq(note_name, y)
-                        .unwrap_or(self.base_freq[ch]);
+                    self.arp_step_count[ch] = match y {
+                        Some(y) => {
+                            self.arp_y_freq[ch] = self
+                                .arp_offset_freq(note_name, y)
+                                .unwrap_or(self.base_freq[ch]);
+                            3
+                        }
+                        None => 2,
+                    };
                     self.arp_active[ch] = true;
                 } else {
                     self.arp_active[ch] = false;
@@ -445,23 +455,22 @@ impl PlayerInner {
     }
 
     fn advance_tick(&mut self) {
-        let step = self.tick_count;
         for ch in 0..AUDIO_CHANNELS {
             if !self.arp_active[ch] {
                 continue;
             }
-            let freq = match step {
+            let freq = match self.arp_step[ch] {
                 0 => self.base_freq[ch],
                 1 => self.arp_x_freq[ch],
                 _ => self.arp_y_freq[ch],
             };
             self.set_voice_frequency(ch, freq);
+            self.arp_step[ch] = if self.arp_step[ch] + 1 >= self.arp_step_count[ch] {
+                0
+            } else {
+                self.arp_step[ch] + 1
+            };
         }
-        self.tick_count = if self.tick_count >= 2 {
-            0
-        } else {
-            self.tick_count + 1
-        };
     }
 
     fn run_acp_until_sample(&mut self) -> bool {

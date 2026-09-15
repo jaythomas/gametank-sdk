@@ -72,10 +72,6 @@ impl ExportConfirmModal {
         self.state = ModalState::Error;
         self.focused = Btn::Cancel;
     }
-
-    pub fn path(&self) -> &PathBuf {
-        &self.path
-    }
 }
 
 impl Component for ExportConfirmModal {

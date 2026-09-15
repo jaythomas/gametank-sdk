@@ -444,9 +444,7 @@ impl TuningEditor {
         );
         let result = FileExplorerBuilder::default()
             .filter_map(|file| {
-                if file.is_dir {
-                    Some(file)
-                } else if file.path.extension().is_some_and(|ext| ext == "scl") {
+                if file.is_dir || file.path.extension().is_some_and(|ext| ext == "scl") {
                     Some(file)
                 } else {
                     None

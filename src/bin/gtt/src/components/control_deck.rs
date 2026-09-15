@@ -319,14 +319,10 @@ impl ControlDeck {
     }
 
     pub fn set_names(&mut self, names: &[String; NUM_INSTRUMENTS]) {
-        for i in 0..NUM_INSTRUMENTS {
-            self.instruments[i].name_input.set_value(names[i].clone());
-            self.instruments[i].name_snapshot = names[i].clone();
+        for (i, instrument) in self.instruments.iter_mut().enumerate() {
+            instrument.name_input.set_value(names[i].clone());
+            instrument.name_snapshot = names[i].clone();
         }
-    }
-
-    pub fn get_sample_rate(&self) -> u8 {
-        self.sample_rate
     }
 
     pub fn set_sample_rate(&mut self, rate: u8) {
@@ -336,10 +332,6 @@ impl ControlDeck {
             .position(|&r| r == rate)
             .unwrap_or(2);
         self.rate_state.set_value(idx);
-    }
-
-    fn sample_rate_index(&self) -> usize {
-        self.rate_state.value()
     }
 
     pub fn blur_all(&mut self) {
@@ -1652,7 +1644,6 @@ impl Component for ControlDeck {
 
         const NEW_OPEN_BTN_W: u16 = 11;
         const QUIT_BTN_W: u16 = 6;
-        const EXPORT_BTN_W: u16 = 8;
 
         let new_open_focused = sel_row == Row::ActionNewOpen;
         let quit_focused = sel_row == Row::ActionQuit;

@@ -16,7 +16,6 @@ pub enum ComponentAction {
     SaveAndQuit,
     InstrumentSaved(usize, [u8; 256]),
     TuningSaved(TuningData),
-    SetSampleRate(u8),
     OpenFile(PathBuf),
     CreateNewFile(PathBuf),
     PatternPrev,

@@ -95,8 +95,8 @@ See the [Tuning editor](#tuning-editor) for how to update these mappings.
 | 3  | PitchDown   | x (00-FF) = how many steps down to slide to | Portamento that increments at a rate of FxSpeed. |
 | 4  | FadeIn      | x (00-3B) = how many ticks to hold each volume increment | Play note with a volume of 0 and raise volume up to the volume level set for that beat. |
 | 5  | FadeOut     | x (00-3B) = how many ticks to hold each volume increment | Play note at the volume level set for that beat and lower volume down to as low as the FadeOut speed allows |
-| 6  | Tremble     | x (00-3B) = how many ticks to hold a note off then on | Hard tremolo. Rapidly play and mute a note.
-
+| 6  | Tremble     | x (00-3B) = how many ticks to hold a note off then on | Hard tremolo. Rapidly play and mute a note. |
+| 7  | Instrument  | x (0-F) = instrument index | Switch which instrument this channel is using. |
 
 ## Control deck
 
@@ -107,8 +107,6 @@ The control deck allows you to edit global track parameters, pattern-level param
 **Beats** changes the length of the current pattern.
 
 **Trans** transposes the key bindings up/down one unison. With the default tuning, this means incrementing up one octave from c5-g6 to c6-g7. SHIFT key will also shift the range up temporarily.
-
-**Rate** sets the sample rate for the track. This does not carry over into the export data. A custom sample rate can be applied at runtime via the SDKs.
 
 **FxSpeed** is the starting effects speed for the track (see **SEQ** commands for more details).
 

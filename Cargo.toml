@@ -114,8 +114,8 @@ confy = "2.0.0"
 cpal = "0.15"
 crossbeam-channel = "0.5.15"
 crossterm = "0.29.0"
-gte-acp = "0.17.1"
-gte-w65c02s = "0.17.1"
+gte-acp = { path = "emulator/core/gte-acp", version = "0.17.1" }
+gte-w65c02s = { path = "emulator/core/gte-w65c02s", version = "0.17.1" }
 indexmap = { version = "2", features = ["serde"] }
 ratatui = "0.30.2"
 ratatui-explorer = "0.3.0"

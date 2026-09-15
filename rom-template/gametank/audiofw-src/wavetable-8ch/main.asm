@@ -130,7 +130,14 @@ audio_irq:
     lda #0x80
     sta TEMP_SAMPLE        ; Use as running mix accumulator
 
-    ; Process all 8 voices using macro
+    ; Process only 7 of the 8 voices. Each PROCESS_VOICE costs 79 cycles.
+    ; The full 8-voice ISR at 657 cycles including IRQ dispatch is too
+    ; expensive for any audio_freq setting fast enough to be useful.
+    ;
+    ; 578 cycles for 7 voices
+    ; + 6 cycles for the `jmp main_loop; wai`
+    ; ---
+    ; 584 total, fitting within the 592 cycle budget
     PROCESS_VOICE 0
     PROCESS_VOICE 1
     PROCESS_VOICE 2
@@ -138,7 +145,7 @@ audio_irq:
     PROCESS_VOICE 4
     PROCESS_VOICE 5
     PROCESS_VOICE 6
-    PROCESS_VOICE 7
+    ;PROCESS_VOICE 7
 
     ; Output final mixed sample
     lda TEMP_SAMPLE

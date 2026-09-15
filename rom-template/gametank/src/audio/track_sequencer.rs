@@ -1,5 +1,7 @@
 use super::wavetable_8ch::{voices, VOICE_COUNT, WAVETABLE};
 
+pub const SAMPLE_RATE_REG: u8 = 0xC9;
+
 // Number of parallel per-beat arrays packed into each channel's slice of a
 // pattern's data block:
 // - freq_lo
@@ -94,13 +96,16 @@ impl TrackSequencer {
         }
     }
 
-    // Point each voice at its corresponding instrument wavetable and mute all voices
+    // Point each voice at its corresponding instrument wavetable, mute all
+    // voices, and set the audio_freq register to the rate gt-tracker exports
+    // assume. TODO: channels should default to the first instrument perhaps?
     pub fn init_voices(&self) {
         let v = voices();
         for i in 0..VOICE_COUNT {
             v[i].set_wavetable(WAVETABLE[i]);
             v[i].set_volume(0);
         }
+        unsafe { core::ptr::write_volatile(0x2006 as *mut u8, SAMPLE_RATE_REG) };
     }
 
     // Advance the sequencer by one frame every game loop

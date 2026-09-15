@@ -40,7 +40,6 @@ impl TrackerContainer {
     pub fn init(file: &TrackerFile) -> Self {
         let mut control_deck = ControlDeck::init();
         control_deck.set_names(&file.instrument_names());
-        control_deck.set_sample_rate(file.sample_rate);
         control_deck.set_bpm(file.bpm);
         control_deck.set_fx_speed(file.fx_speed);
         let mut pattern_editor = PatternEditor::init();
@@ -228,7 +227,6 @@ impl Component for TrackerContainer {
         };
         render_focus_indicator(frame, focused_area);
 
-        self.control_deck.render_popup(frame, area);
         self.pattern_editor.render_popup(frame, area);
     }
 }

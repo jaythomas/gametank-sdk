@@ -8,6 +8,7 @@ mod export;
 mod file;
 mod lane;
 mod player;
+mod sample_rate;
 mod scheme;
 mod tracker;
 mod util;

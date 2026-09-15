@@ -26,7 +26,6 @@ pub enum PlayerCmd {
     UpdatePatterns(Vec<Pattern>, Vec<u8>),
     UpdateWaveform(usize, Box<[u8; 256]>),
     UpdateTuningNotes(IndexMap<String, f64>),
-    SetSampleRate(u8),
 }
 
 struct PlayerInner {
@@ -80,8 +79,8 @@ impl PlayerInner {
         output_sample_rate: f64,
         output_channels: usize,
         bpm: u16,
-        sample_rate_reg: u8,
     ) -> Self {
+        let sample_rate_reg = crate::sample_rate::SAMPLE_RATE_REG;
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
             (*aram_ptr).copy_from_slice(FIRMWARE);
@@ -212,13 +211,6 @@ impl PlayerInner {
                 }
                 PlayerCmd::UpdateTuningNotes(notes) => {
                     self.tuning_notes = notes;
-                }
-                PlayerCmd::SetSampleRate(reg) => {
-                    self.acp_sample_rate_reg = reg;
-                    self.acp_sample_rate = CPU_FREQ / reg as f64;
-                    self.acp_bus.irq_counter = (reg as i32) * 4;
-                    self.audio_out =
-                        GameTankAudio::new(self.acp_sample_rate, self.output_sample_rate);
                 }
             }
         }
@@ -579,7 +571,7 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new(bpm: u16, sample_rate_reg: u8) -> Option<Self> {
+    pub fn new(bpm: u16) -> Option<Self> {
         let host = cpal::default_host();
         let device = host.default_output_device()?;
         let config = device.default_output_config().ok()?;
@@ -600,7 +592,6 @@ impl Player {
             output_sample_rate,
             output_channels,
             bpm,
-            sample_rate_reg,
         );
 
         let stream = device
@@ -667,9 +658,5 @@ impl Player {
 
     pub fn update_tuning_notes(&self, notes: IndexMap<String, f64>) {
         let _ = self.cmd_tx.send(PlayerCmd::UpdateTuningNotes(notes));
-    }
-
-    pub fn set_sample_rate(&self, reg: u8) {
-        let _ = self.cmd_tx.send(PlayerCmd::SetSampleRate(reg));
     }
 }

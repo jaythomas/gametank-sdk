@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
 use rat_widget::button::{Button, ButtonState};
-use rat_widget::choice::{Choice, ChoiceState};
 use rat_widget::text::HasScreenCursor;
 use rat_widget::text_input::{TextInput, TextInputState, handle_events};
 use ratatui::{
@@ -43,16 +42,12 @@ impl InstrumentEntry {
     }
 }
 
-const SAMPLE_RATE_OPTIONS: [u8; 5] = [0xFF, 0xEF, 0xD0, 0xB7, 0xA8];
-const SAMPLE_RATE_LABELS: [&str; 5] = ["14kHz", "16kHz", "22kHz", "32kHz", "44kHz"];
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Row {
     Bpm,
     FxSpeed,
     Beats,
     Trans,
-    SampleRate,
     ActionPlay,
     ActionNewOpen,
     Instrument(usize),
@@ -97,7 +92,6 @@ impl Row {
             Row::FxSpeed => "FxSpeed: ",
             Row::Beats => "Beats:   ",
             Row::Trans => "Trans:   ",
-            Row::SampleRate => "Rate:    ",
             Row::Instrument(_)
             | Row::ActionPlay
             | Row::ActionNewOpen
@@ -120,7 +114,6 @@ impl Row {
             Row::FxSpeed => (1, 31),
             Row::Beats => (0, 255),
             Row::Trans
-            | Row::SampleRate
             | Row::Instrument(_)
             | Row::ActionPlay
             | Row::ActionNewOpen
@@ -148,9 +141,6 @@ enum Col {
 
 impl Col {
     fn next(self, row: Row) -> Self {
-        if row == Row::SampleRate {
-            return Col::Input;
-        }
         if row.is_setting() {
             match self {
                 Col::Input => Col::Plus,
@@ -168,9 +158,6 @@ impl Col {
     }
 
     fn prev(self, row: Row) -> Self {
-        if row == Row::SampleRate {
-            return Col::Input;
-        }
         if row.is_setting() {
             match self {
                 Col::Minus => Col::Plus,
@@ -190,7 +177,7 @@ impl Col {
 
 fn default_col(row: Row) -> Col {
     match row {
-        Row::Bpm | Row::FxSpeed | Row::Beats | Row::Trans | Row::SampleRate => Col::Input,
+        Row::Bpm | Row::FxSpeed | Row::Beats | Row::Trans => Col::Input,
         Row::Instrument(_)
         | Row::ActionPlay
         | Row::ActionNewOpen
@@ -225,8 +212,6 @@ pub struct ControlDeck {
     editing: bool,
     instruments: [InstrumentEntry; NUM_INSTRUMENTS],
     pub playing: bool,
-    rate_state: ChoiceState<usize>,
-    sample_rate: u8,
     rows_input: TextInputState,
     rows_minus: ButtonState,
     rows_plus: ButtonState,
@@ -303,12 +288,6 @@ impl ControlDeck {
             pattern_zap_btn: ButtonState::new(),
             pattern_idx: 0,
             pattern_count: 1,
-            rate_state: {
-                let mut s = ChoiceState::<usize>::new();
-                s.set_value(2usize);
-                s
-            },
-            sample_rate: 0xD0,
             save_feedback_until: None,
             export_feedback_until: None,
         }
@@ -323,15 +302,6 @@ impl ControlDeck {
             instrument.name_input.set_value(names[i].clone());
             instrument.name_snapshot = names[i].clone();
         }
-    }
-
-    pub fn set_sample_rate(&mut self, rate: u8) {
-        self.sample_rate = rate;
-        let idx = SAMPLE_RATE_OPTIONS
-            .iter()
-            .position(|&r| r == rate)
-            .unwrap_or(2);
-        self.rate_state.set_value(idx);
     }
 
     pub fn blur_all(&mut self) {
@@ -350,7 +320,6 @@ impl ControlDeck {
         self.trans_input.focus.set(false);
         self.trans_plus.focus.set(false);
         self.trans_minus.focus.set(false);
-        self.rate_state.focus.set(false);
         for entry in &mut self.instruments {
             entry.open_button.focus.set(false);
             entry.name_input.focus.set(false);
@@ -495,7 +464,6 @@ impl ControlDeck {
         self.trans_minus
             .focus
             .set(row == Row::Trans && col == Col::Minus);
-        self.rate_state.focus.set(row == Row::SampleRate);
         for i in 0..NUM_INSTRUMENTS {
             let is_row = row == Row::Instrument(i);
             self.instruments[i]
@@ -530,8 +498,7 @@ impl ControlDeck {
             Row::Beats => &mut self.rows_input,
             Row::Trans => &mut self.trans_input,
             Row::Instrument(i) => &mut self.instruments[i].name_input,
-            Row::SampleRate
-            | Row::ActionPlay
+            Row::ActionPlay
             | Row::ActionNewOpen
             | Row::ActionTuning
             | Row::ActionQuit
@@ -569,8 +536,7 @@ impl ControlDeck {
             | Row::PatternNew
             | Row::PatternCopy
             | Row::PatternDelete
-            | Row::PatternZap
-            | Row::SampleRate => {}
+            | Row::PatternZap => {}
         }
     }
 
@@ -607,14 +573,13 @@ impl ControlDeck {
             | Row::PatternNew
             | Row::PatternCopy
             | Row::PatternDelete
-            | Row::PatternZap
-            | Row::SampleRate => {}
+            | Row::PatternZap => {}
         }
         self.editing = false;
     }
 
     fn start_editing(&mut self) {
-        if self.selected_row.is_action() || self.selected_row == Row::SampleRate {
+        if self.selected_row.is_action() {
             return;
         }
         self.take_snapshot();
@@ -680,8 +645,7 @@ impl ControlDeck {
             | Row::PatternNew
             | Row::PatternCopy
             | Row::PatternDelete
-            | Row::PatternZap
-            | Row::SampleRate => {}
+            | Row::PatternZap => {}
         }
         self.editing = false;
     }
@@ -749,39 +713,6 @@ impl ControlDeck {
     }
 
     fn handle_mouse_click(&mut self, pos: Position, actions: &mut Vec<ComponentAction>) -> bool {
-        if self.rate_state.is_popup_active() {
-            let popup_area = self.rate_state.popup.area;
-            if popup_area.contains(pos) {
-                let offset = self.rate_state.offset();
-                for (i, &item_area) in self.rate_state.item_areas.iter().enumerate() {
-                    if item_area.contains(pos) {
-                        let idx = offset + i;
-                        self.rate_state.set_value(idx);
-                        self.rate_state.set_popup_active(false);
-                        if idx < SAMPLE_RATE_OPTIONS.len() {
-                            self.sample_rate = SAMPLE_RATE_OPTIONS[idx];
-                            actions.push(ComponentAction::SetSampleRate(self.sample_rate));
-                        }
-                        return true;
-                    }
-                }
-                return true;
-            }
-            self.rate_state.set_popup_active(false);
-        }
-
-        let rate_area = self.rate_state.area;
-        if rate_area.contains(pos) {
-            if self.editing {
-                self.confirm_editing();
-            }
-            self.selected_row = Row::SampleRate;
-            self.selected_col = Col::Input;
-            self.rate_state.flip_popup_active();
-            self.update_focus_states();
-            return true;
-        }
-
         let bpm_plus_area = self.bpm_plus.area;
         let bpm_minus_area = self.bpm_minus.area;
         let fx_speed_plus_area = self.fx_speed_plus.area;
@@ -1153,31 +1084,6 @@ impl Component for ControlDeck {
                                 let _ = handle_events(state, true, event);
                             }
                         }
-                    } else if self.selected_row == Row::SampleRate
-                        && self.rate_state.is_popup_active()
-                    {
-                        match code {
-                            KeyCode::Up => {
-                                let cur = self.rate_state.value();
-                                if cur > 0 {
-                                    self.rate_state.set_value(cur - 1);
-                                }
-                            }
-                            KeyCode::Down => {
-                                let cur = self.rate_state.value();
-                                let next = (cur + 1).min(SAMPLE_RATE_OPTIONS.len() - 1);
-                                self.rate_state.set_value(next);
-                            }
-                            KeyCode::Enter | KeyCode::Esc => {
-                                self.rate_state.set_popup_active(false);
-                                let idx = self.rate_state.value();
-                                if idx < SAMPLE_RATE_OPTIONS.len() {
-                                    self.sample_rate = SAMPLE_RATE_OPTIONS[idx];
-                                    actions.push(ComponentAction::SetSampleRate(self.sample_rate));
-                                }
-                            }
-                            _ => {}
-                        }
                     } else {
                         match code {
                             KeyCode::Up => {
@@ -1186,8 +1092,7 @@ impl Component for ControlDeck {
                                     Row::FxSpeed => Row::Bpm,
                                     Row::Beats => Row::FxSpeed,
                                     Row::Trans => Row::Beats,
-                                    Row::SampleRate => Row::Trans,
-                                    Row::ActionPlay => Row::SampleRate,
+                                    Row::ActionPlay => Row::Trans,
                                     Row::Instrument(0) => Row::ActionPlay,
                                     Row::Instrument(i) => Row::Instrument(i - 1),
                                     Row::ActionTuning => Row::Instrument(NUM_INSTRUMENTS - 1),
@@ -1211,8 +1116,7 @@ impl Component for ControlDeck {
                                     Row::Bpm => Row::FxSpeed,
                                     Row::FxSpeed => Row::Beats,
                                     Row::Beats => Row::Trans,
-                                    Row::Trans => Row::SampleRate,
-                                    Row::SampleRate => Row::ActionPlay,
+                                    Row::Trans => Row::ActionPlay,
                                     Row::ActionPlay => Row::Instrument(0),
                                     Row::Instrument(i) if i < NUM_INSTRUMENTS - 1 => {
                                         Row::Instrument(i + 1)
@@ -1245,60 +1149,56 @@ impl Component for ControlDeck {
                                 self.update_focus_states();
                             }
                             KeyCode::Enter => {
-                                if self.selected_row == Row::SampleRate {
-                                    self.rate_state.flip_popup_active();
-                                } else {
-                                    match self.selected_col {
-                                        Col::Input => self.start_editing(),
-                                        Col::Plus => self.increment(),
-                                        Col::Minus => self.decrement(),
-                                        Col::Open => match self.selected_row {
-                                            Row::ActionPlay => {
-                                                actions.push(ComponentAction::Play);
-                                            }
-                                            Row::ActionNewOpen => {
-                                                actions.push(ComponentAction::OpenFileBrowser);
-                                            }
-                                            Row::Instrument(i) => {
-                                                actions
-                                                    .push(ComponentAction::OpenInstrumentEditor(i));
-                                            }
-                                            Row::ActionTuning => {
-                                                actions.push(ComponentAction::OpenTuningEditor);
-                                            }
-                                            Row::ActionQuit => {
-                                                actions.push(ComponentAction::OpenQuitConfirm);
-                                            }
-                                            Row::ActionSave => {
-                                                actions.push(ComponentAction::SaveFile);
-                                                self.save_feedback_until =
-                                                    Some(Instant::now() + Duration::from_secs(3));
-                                            }
-                                            Row::ActionExport => {
-                                                actions.push(ComponentAction::Export);
-                                            }
-                                            Row::PatternPrev => {
-                                                actions.push(ComponentAction::PatternPrev);
-                                            }
-                                            Row::PatternNext => {
-                                                actions.push(ComponentAction::PatternNext);
-                                            }
-                                            Row::PatternNew => {
-                                                actions.push(ComponentAction::PatternNew);
-                                            }
-                                            Row::PatternCopy => {
-                                                actions.push(ComponentAction::PatternCopy);
-                                            }
-                                            Row::PatternDelete => {
-                                                actions
-                                                    .push(ComponentAction::OpenPatternDeleteConfirm);
-                                            }
-                                            Row::PatternZap => {
-                                                actions.push(ComponentAction::PatternZap);
-                                            }
-                                            _ => {}
-                                        },
-                                    }
+                                match self.selected_col {
+                                    Col::Input => self.start_editing(),
+                                    Col::Plus => self.increment(),
+                                    Col::Minus => self.decrement(),
+                                    Col::Open => match self.selected_row {
+                                        Row::ActionPlay => {
+                                            actions.push(ComponentAction::Play);
+                                        }
+                                        Row::ActionNewOpen => {
+                                            actions.push(ComponentAction::OpenFileBrowser);
+                                        }
+                                        Row::Instrument(i) => {
+                                            actions
+                                                .push(ComponentAction::OpenInstrumentEditor(i));
+                                        }
+                                        Row::ActionTuning => {
+                                            actions.push(ComponentAction::OpenTuningEditor);
+                                        }
+                                        Row::ActionQuit => {
+                                            actions.push(ComponentAction::OpenQuitConfirm);
+                                        }
+                                        Row::ActionSave => {
+                                            actions.push(ComponentAction::SaveFile);
+                                            self.save_feedback_until =
+                                                Some(Instant::now() + Duration::from_secs(3));
+                                        }
+                                        Row::ActionExport => {
+                                            actions.push(ComponentAction::Export);
+                                        }
+                                        Row::PatternPrev => {
+                                            actions.push(ComponentAction::PatternPrev);
+                                        }
+                                        Row::PatternNext => {
+                                            actions.push(ComponentAction::PatternNext);
+                                        }
+                                        Row::PatternNew => {
+                                            actions.push(ComponentAction::PatternNew);
+                                        }
+                                        Row::PatternCopy => {
+                                            actions.push(ComponentAction::PatternCopy);
+                                        }
+                                        Row::PatternDelete => {
+                                            actions
+                                                .push(ComponentAction::OpenPatternDeleteConfirm);
+                                        }
+                                        Row::PatternZap => {
+                                            actions.push(ComponentAction::PatternZap);
+                                        }
+                                        _ => {}
+                                    },
                                 }
                                 self.update_focus_states();
                             }
@@ -1357,7 +1257,6 @@ impl Component for ControlDeck {
             .add_modifier(Modifier::BOLD);
 
         let setting_rows = Layout::vertical([
-            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -1449,55 +1348,13 @@ impl Component for ControlDeck {
             );
         }
 
-        let rate_row_area = setting_rows[4];
-        let rate_row_sel = sel_row == Row::SampleRate;
-        let [rate_label_area, rate_value_area, _] = Layout::horizontal([
-            Constraint::Length(label_w),
-            Constraint::Length(8),
-            Constraint::Fill(1),
-        ])
-        .areas(rate_row_area);
-
-        frame.render_widget(
-            Paragraph::new(Row::SampleRate.label()).style(if rate_row_sel {
-                selected_style
-            } else {
-                default_style
-            }),
-            rate_label_area,
-        );
-
-        let rate_items: Vec<(usize, Line)> = SAMPLE_RATE_OPTIONS
-            .iter()
-            .enumerate()
-            .map(|(i, _)| (i, Line::from(SAMPLE_RATE_LABELS[i])))
-            .collect();
-        let (rate_widget, _rate_popup) = Choice::new()
-            .items(rate_items)
-            .style(if rate_row_sel {
-                selected_style
-            } else {
-                default_style
-            })
-            .select_style(
-                Style::default()
-                    .bg(SCHEME.orange[3])
-                    .fg(SCHEME.black[0])
-                    .add_modifier(Modifier::BOLD),
-            )
-            .focus_style(selected_style)
-            .popup_len(SAMPLE_RATE_OPTIONS.len() as u16)
-            .into_widgets();
-        self.rate_state.focus.set(rate_row_sel);
-        frame.render_stateful_widget(rate_widget, rate_value_area, &mut self.rate_state);
-
         const PLAY_BTN_W: u16 = 7;
         let play_focused = sel_row == Row::ActionPlay;
         let play_label = if self.playing { "[Pause]" } else { "[Play]" };
         let play_area = Rect {
-            x: setting_rows[5].x,
-            y: setting_rows[5].y,
-            width: PLAY_BTN_W.min(setting_rows[5].width),
+            x: setting_rows[4].x,
+            y: setting_rows[4].y,
+            width: PLAY_BTN_W.min(setting_rows[4].width),
             height: 1,
         };
         self.action_play_btn.focus.set(play_focused);
@@ -1847,32 +1704,5 @@ impl Component for ControlDeck {
             pattern_zap_area,
             &mut self.pattern_zap_btn,
         );
-    }
-}
-
-impl ControlDeck {
-    pub fn render_popup(&mut self, frame: &mut Frame, boundary: Rect) {
-        if !self.rate_state.is_popup_active() {
-            return;
-        }
-        let bg = SCHEME.true_dark_color(SCHEME.black[3]);
-        let rate_items: Vec<(usize, Line)> = SAMPLE_RATE_OPTIONS
-            .iter()
-            .enumerate()
-            .map(|(i, _)| (i, Line::from(SAMPLE_RATE_LABELS[i])))
-            .collect();
-        let (_, rate_popup) = Choice::new()
-            .items(rate_items)
-            .style(Style::new().bg(bg).fg(SCHEME.white[2]))
-            .select_style(
-                Style::default()
-                    .bg(SCHEME.orange[3])
-                    .fg(SCHEME.black[0])
-                    .add_modifier(Modifier::BOLD),
-            )
-            .popup_len(SAMPLE_RATE_OPTIONS.len() as u16)
-            .popup_boundary(boundary)
-            .into_widgets();
-        frame.render_stateful_widget(rate_popup, boundary, &mut self.rate_state);
     }
 }

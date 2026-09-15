@@ -41,8 +41,6 @@ pub struct TrackerFile {
     pub patterns: Vec<Pattern>,
     #[serde(default = "default_pattern_beats")]
     pub pattern_beats: Vec<u8>,
-    #[serde(default = "default_sample_rate")]
-    pub sample_rate: u8,
     pub bpm: u16,
     pub fx_speed: u8,
 }
@@ -211,10 +209,6 @@ pub fn default_tuning() -> TuningData {
     }
 }
 
-fn default_sample_rate() -> u8 {
-    0xD0
-}
-
 fn default_pattern_beats() -> Vec<u8> {
     vec![64]
 }
@@ -234,7 +228,6 @@ impl TrackerFile {
             tuning: default_tuning(),
             patterns: vec![empty_pattern()],
             pattern_beats: vec![64],
-            sample_rate: 0xD0,
             bpm: 120,
             fx_speed: 6,
         }

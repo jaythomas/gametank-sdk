@@ -52,7 +52,7 @@ impl App {
         let terminal = ratatui::init();
         execute!(std::io::stdout(), event::EnableMouseCapture)?;
         let tracker_container = TrackerContainer::init(&file_data);
-        let player = Player::new(120, file_data.sample_rate);
+        let player = Player::new(120);
         let mut file_browser = FileBrowser::new();
         if no_file {
             file_browser.visible = true;
@@ -297,7 +297,6 @@ impl App {
                         self.input_path = path;
                         self.tracker_container = TrackerContainer::init(&self.file_data);
                         if let Some(player) = &mut self.player {
-                            player.set_sample_rate(self.file_data.sample_rate);
                             player.pause();
                         }
                     }
@@ -312,7 +311,6 @@ impl App {
                     self.input_path = path;
                     self.tracker_container = TrackerContainer::init(&self.file_data);
                     if let Some(player) = &mut self.player {
-                        player.set_sample_rate(self.file_data.sample_rate);
                         player.pause();
                     }
                 }
@@ -388,12 +386,6 @@ impl App {
                     self.config.bindings.key_assignments =
                         build_key_assignments(&tuning.key_assignments);
                     let _ = confy::store("gtt", None, &self.config);
-                }
-                ComponentAction::SetSampleRate(rate) => {
-                    self.file_data.sample_rate = rate;
-                    if let Some(player) = &self.player {
-                        player.set_sample_rate(rate);
-                    }
                 }
                 ComponentAction::RequestFocus => {}
             }

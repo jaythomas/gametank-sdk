@@ -23,8 +23,8 @@ use crate::{
     action::ComponentAction,
     component::Component,
     file::{Interval, TrackerFile, TuningData},
+    sample_rate::hz_to_inc_q16,
     scheme::SCHEME,
-    util::hz_to_inc_q16,
 };
 
 const CANCEL_BTN_W: u16 = 8;

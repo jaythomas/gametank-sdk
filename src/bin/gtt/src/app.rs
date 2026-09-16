@@ -264,7 +264,7 @@ impl App {
                             let patterns = self.file_data.patterns.clone();
                             let beats_list = self.file_data.pattern_beats.clone();
                             player.update_patterns(patterns, beats_list);
-                            for i in 0..NUM_INSTRUMENTS.min(8) {
+                            for i in 0..NUM_INSTRUMENTS {
                                 player.update_waveform(i, self.file_data.instrument_waveform(i));
                             }
                             player.update_tuning_notes(self.file_data.tuning.notes.clone());

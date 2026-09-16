@@ -4,15 +4,13 @@ use std::path::Path;
 
 use crate::file::{NUM_INSTRUMENTS, TrackerFile};
 use crate::sample_rate::{SAMPLE_RATE_REG, sample_rate_reg_to_hz};
-use crate::tracker::{ChannelCmd, SequencerCmd};
+use crate::tracker::{ChannelCmd, FX_ID_ARPEGGIO, FX_ID_INSTRUMENT, FX_ID_NONE, SequencerCmd};
 
 const CHANNELS: usize = 8;
 
 const VOL_NO_CHANGE: u8 = 0xFF;
 
 // Fx cell encoding
-const FX_NONE: u8 = 0;
-const FX_ARPEGGIO: u8 = 1;
 const ARP_NO_THIRD_NOTE: u8 = 0xFF;
 
 fn note_to_freq_inc(hz: f64, sample_rate_hz: f64) -> u16 {
@@ -66,7 +64,7 @@ fn bake_pattern(
             let mut explicit_vol: Option<u8> = None;
             let mut has_note = false;
             let mut has_note_off = false;
-            let mut fx_id = FX_NONE;
+            let mut fx_id = FX_ID_NONE;
             let mut fx_x = 0u8;
             let mut fx_y = 0u8;
 
@@ -90,8 +88,12 @@ fn bake_pattern(
                     ChannelCmd::NoteOff => {
                         has_note_off = true;
                     }
+                    ChannelCmd::Instrument(idx) => {
+                        fx_id = FX_ID_INSTRUMENT;
+                        fx_x = *idx;
+                    }
                     ChannelCmd::Arpeggio(x, y) => {
-                        fx_id = FX_ARPEGGIO;
+                        fx_id = FX_ID_ARPEGGIO;
                         fx_x = *x;
                         fx_y = y.unwrap_or(ARP_NO_THIRD_NOTE);
                     }
@@ -114,7 +116,7 @@ fn bake_pattern(
             };
 
             let (mut arp_x_freq, mut arp_y_freq) = (0u16, 0u16);
-            if fx_id == FX_ARPEGGIO
+            if fx_id == FX_ID_ARPEGGIO
                 && let Some(name) = &cur_note_name
             {
                 arp_x_freq = arp_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(0);

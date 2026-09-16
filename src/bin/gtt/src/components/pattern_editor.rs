@@ -18,7 +18,10 @@ use crate::{
     file::{TrackerFile, TuningData},
     lane::{Lane, LaneKind},
     scheme::SCHEME,
-    tracker::{Beat, ChannelCmd, Pattern, SequencerCmd},
+    tracker::{
+        Beat, ChannelCmd, FX_ID_ARPEGGIO, FX_ID_INSTRUMENT, MAX_INSTRUMENT_INDEX, Pattern,
+        SequencerCmd,
+    },
 };
 
 mod keybinds {
@@ -231,11 +234,7 @@ impl PatternEditor {
             }
             LaneKind::Fx => {
                 let b = Self::get_channel_beat(lane.ch, beat, pattern);
-                let arp = b.cmd_list.iter().find_map(|c| match c {
-                    ChannelCmd::Arpeggio(x, y) => Some((*x, *y)),
-                    _ => None,
-                });
-                CellDisplay::Fx(arp.map(|(x, y)| (1u8, x, y)))
+                CellDisplay::Fx(b.fx())
             }
         }
     }
@@ -621,31 +620,29 @@ impl Component for PatternEditor {
                         && c.is_ascii_hexdigit() =>
                     {
                         let digit = c.to_digit(16).unwrap() as u8;
-                        let (mut fx_id, mut fx_x, mut fx_y, digits_typed) =
-                            match self.fx_edit {
-                                Some((c, n)) if c == cell => {
-                                    let pattern = file.current_pattern(self.pattern_idx);
-                                    let (id, x, y) = pattern[channel + 1][row]
-                                        .cmd_list
-                                        .iter()
-                                        .find_map(|c| match c {
-                                            ChannelCmd::Arpeggio(x, y) => Some((1u8, *x, *y)),
-                                            _ => None,
-                                        })
-                                        .unwrap_or((0, 0, None));
-                                    (id, x, y, n)
-                                }
-                                _ => (0, 0, None, 0),
-                            };
+                        let (mut fx_id, mut fx_x, mut fx_y, digits_typed) = match self.fx_edit {
+                            Some((c, n)) if c == cell => {
+                                let pattern = file.current_pattern(self.pattern_idx);
+                                let (id, x, y) =
+                                    pattern[channel + 1][row].fx().unwrap_or((0, 0, None));
+                                (id, x, y, n)
+                            }
+                            _ => (0, 0, None, 0),
+                        };
 
                         match digits_typed {
                             0 => {
-                                if digit > 1 {
+                                if digit > FX_ID_ARPEGGIO {
                                     continue;
                                 }
                                 fx_id = digit;
                             }
-                            1 => fx_x = digit,
+                            1 => {
+                                if fx_id == FX_ID_INSTRUMENT && digit > MAX_INSTRUMENT_INDEX {
+                                    continue;
+                                }
+                                fx_x = digit;
+                            }
                             _ => fx_y = Some(digit),
                         }
                         let digits_typed = (digits_typed + 1).min(3);
@@ -654,9 +651,11 @@ impl Component for PatternEditor {
                         let pattern = file.current_pattern_mut(self.pattern_idx);
                         let beat = &mut pattern[channel + 1][row];
                         beat.cmd_list
-                            .retain(|c| !matches!(c, ChannelCmd::Arpeggio(_, _)));
-                        if fx_id == 1 {
-                            beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y));
+                            .retain(|c| !matches!(c, ChannelCmd::Instrument(_) | ChannelCmd::Arpeggio(_, _)));
+                        match fx_id {
+                            FX_ID_INSTRUMENT => beat.cmd_list.push(ChannelCmd::Instrument(fx_x)),
+                            FX_ID_ARPEGGIO => beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y)),
+                            _ => {}
                         }
                     }
                     Event::Key(KeyEvent {
@@ -680,14 +679,8 @@ impl Component for PatternEditor {
                             } else {
                                 self.fx_edit = Some((cell, remaining));
                                 let pattern = file.current_pattern(self.pattern_idx);
-                                let (id, x, _y) = pattern[channel + 1][row]
-                                    .cmd_list
-                                    .iter()
-                                    .find_map(|c| match c {
-                                        ChannelCmd::Arpeggio(x, y) => Some((1u8, *x, *y)),
-                                        _ => None,
-                                    })
-                                    .unwrap_or((0, 0, None));
+                                let (id, x, _y) =
+                                    pattern[channel + 1][row].fx().unwrap_or((0, 0, None));
                                 match remaining {
                                     2 => (id, x, None),
                                     _ => (id, 0, None),
@@ -696,10 +689,17 @@ impl Component for PatternEditor {
 
                             let pattern = file.current_pattern_mut(self.pattern_idx);
                             let beat = &mut pattern[channel + 1][row];
-                            beat.cmd_list
-                                .retain(|c| !matches!(c, ChannelCmd::Arpeggio(_, _)));
-                            if fx_id == 1 {
-                                beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y));
+                            beat.cmd_list.retain(|c| {
+                                !matches!(c, ChannelCmd::Instrument(_) | ChannelCmd::Arpeggio(_, _))
+                            });
+                            match fx_id {
+                                FX_ID_INSTRUMENT => {
+                                    beat.cmd_list.push(ChannelCmd::Instrument(fx_x))
+                                }
+                                FX_ID_ARPEGGIO => {
+                                    beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y))
+                                }
+                                _ => {}
                             }
                         }
                     }

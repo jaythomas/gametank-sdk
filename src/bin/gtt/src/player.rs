@@ -9,6 +9,7 @@ use gte_acp::{ARAM, AcpBus, audio_output::GameTankAudio};
 use gte_w65c02s::W65C02S;
 use indexmap::IndexMap;
 
+use crate::file::NUM_INSTRUMENTS;
 use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
 
 const FIRMWARE: &[u8; 4096] =
@@ -17,6 +18,10 @@ const FIRMWARE: &[u8; 4096] =
 const ROWS_PER_PATTERN: usize = 64;
 const AUDIO_CHANNELS: usize = 8;
 const CPU_FREQ: f64 = 3_579_545.0;
+
+const WAVETABLE: [u16; NUM_INSTRUMENTS] = [
+    0x0300, 0x0400, 0x0500, 0x0600, 0x0700, 0x0800, 0x0900, 0x0A00, 0x0B00, 0x0C00, 0x0D00,
+];
 
 pub enum PlayerCmd {
     Play(usize, usize),
@@ -62,6 +67,7 @@ struct PlayerInner {
     remembered_vol: [u8; AUDIO_CHANNELS],
     muted: [bool; AUDIO_CHANNELS],
     base_freq: [u16; AUDIO_CHANNELS],
+    current_instrument: [usize; AUDIO_CHANNELS],
     arp_active: [bool; AUDIO_CHANNELS],
     arp_x_freq: [u16; AUDIO_CHANNELS],
     arp_y_freq: [u16; AUDIO_CHANNELS],
@@ -132,6 +138,7 @@ impl PlayerInner {
             remembered_vol: [0; AUDIO_CHANNELS],
             muted: [false; AUDIO_CHANNELS],
             base_freq: [0; AUDIO_CHANNELS],
+            current_instrument: std::array::from_fn(|ch| ch),
             arp_active: [false; AUDIO_CHANNELS],
             arp_x_freq: [0; AUDIO_CHANNELS],
             arp_y_freq: [0; AUDIO_CHANNELS],
@@ -205,7 +212,7 @@ impl PlayerInner {
                     }
                 }
                 PlayerCmd::UpdateWaveform(idx, wf) => {
-                    if idx < AUDIO_CHANNELS {
+                    if idx < NUM_INSTRUMENTS {
                         self.write_waveform(idx, &wf);
                     }
                 }
@@ -217,7 +224,7 @@ impl PlayerInner {
     }
 
     fn write_waveform(&mut self, idx: usize, waveform: &[u8; 256]) {
-        let base = 0x0400 + (idx * 0x100);
+        let base = WAVETABLE[idx] as usize;
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
             (&mut (*aram_ptr))[base..base + 256].copy_from_slice(waveform);
@@ -237,7 +244,7 @@ impl PlayerInner {
 
     fn set_voice_waveptr(&mut self, ch: usize, waveform_idx: usize) {
         let base = 0x0041 + (ch * 7);
-        let ptr = 0x0400 + (waveform_idx * 0x100);
+        let ptr = WAVETABLE[waveform_idx];
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
             (*aram_ptr)[base + 4] = (ptr & 0xFF) as u8;
@@ -259,6 +266,7 @@ impl PlayerInner {
             let mut muted = true;
             let mut note_name: Option<String> = None;
             let mut base_freq: u16 = 0;
+            let mut instrument = ch;
             for r in 0..row {
                 let beat = &self.patterns[pattern_idx][ch + 1][r];
                 for cmd in &beat.cmd_list {
@@ -279,6 +287,9 @@ impl PlayerInner {
                                 base_freq = freq_u32.min(0xFFFF) as u16;
                             }
                         }
+                        ChannelCmd::Instrument(idx) => {
+                            instrument = *idx as usize;
+                        }
                         _ => {}
                     }
                 }
@@ -287,6 +298,8 @@ impl PlayerInner {
             self.muted[ch] = muted;
             self.cur_note_name[ch] = note_name;
             self.base_freq[ch] = base_freq;
+            self.current_instrument[ch] = instrument;
+            self.set_voice_waveptr(ch, instrument);
             self.arp_active[ch] = false;
         }
 
@@ -387,6 +400,15 @@ impl PlayerInner {
                 ChannelCmd::Arpeggio(x, y) => Some((*x, *y)),
                 _ => None,
             });
+            let maybe_instrument = beat.cmd_list.iter().find_map(|c| match c {
+                ChannelCmd::Instrument(idx) => Some(*idx as usize),
+                _ => None,
+            });
+
+            if let Some(idx) = maybe_instrument {
+                self.current_instrument[ch] = idx;
+                self.set_voice_waveptr(ch, idx);
+            }
 
             if let Some(v) = maybe_vol {
                 self.remembered_vol[ch] = v;
@@ -403,7 +425,6 @@ impl PlayerInner {
                     let freq_u32 = ((freq_hz / self.acp_sample_rate) * 65536.0).round() as u32;
                     let freq = freq_u32.min(0xFFFF) as u16;
                     self.base_freq[ch] = freq;
-                    self.set_voice_waveptr(ch, ch);
                     if maybe_vol.is_none() && self.muted[ch] {
                         self.muted[ch] = false;
                         self.set_voice_volume(ch, self.remembered_vol[ch]);

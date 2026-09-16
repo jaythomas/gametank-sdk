@@ -1,6 +1,6 @@
 use super::wavetable_8ch::{voices, VOICE_COUNT, WAVETABLE};
 
-pub const SAMPLE_RATE_REG: u8 = 0xC9;
+const SAMPLE_RATE_REG: u8 = 0xC9;
 
 // Number of parallel per-beat arrays packed into each channel's slice of a
 // pattern's data block:
@@ -16,8 +16,8 @@ pub const SAMPLE_RATE_REG: u8 = 0xC9;
 // - arp_freq_y_hi
 const CHANNEL_ARRAYS: usize = 10;
 
-// fx_id value for the Arpeggio effect
-const FX_ARPEGGIO: u8 = 1;
+const FX_ID_INSTRUMENT: u8 = 1;
+const FX_ID_ARPEGGIO: u8 = 2;
 const ARP_NO_THIRD_NOTE: u8 = 0xFF;
 
 /// Drives the 8-channel wavetable synth from a gt-tracker export. Create one
@@ -259,6 +259,7 @@ impl TrackSequencer {
             let hi = unsafe { *data.add(base + off_freq_hi + beat) } as u16;
             let vol = unsafe { *data.add(base + off_vol + beat) };
             let fx_id = unsafe { *data.add(base + off_fx_id + beat) };
+            let fx_x = unsafe { *data.add(base + off_fx_x + beat) };
             let fx_y = unsafe { *data.add(base + off_fx_y + beat) };
 
             if lo | hi != 0 {
@@ -270,7 +271,7 @@ impl TrackSequencer {
                 v[ch].set_volume(vol);
             }
 
-            if fx_id == FX_ARPEGGIO {
+            if fx_id == FX_ID_ARPEGGIO {
                 let arp_x_lo = unsafe { *data.add(base + off_arp_x_lo + beat) } as u16;
                 let arp_x_hi = unsafe { *data.add(base + off_arp_x_hi + beat) } as u16;
                 let arp_y_lo = unsafe { *data.add(base + off_arp_y_lo + beat) } as u16;
@@ -284,6 +285,9 @@ impl TrackSequencer {
                 }
                 any_active = true;
             } else {
+                if fx_id == FX_ID_INSTRUMENT {
+                    v[ch].set_wavetable(WAVETABLE[fx_x as usize]);
+                }
                 unsafe {
                     ARP_ACTIVE[ch] = false;
                     v[ch].set_frequency(BASE_FREQ[ch]);

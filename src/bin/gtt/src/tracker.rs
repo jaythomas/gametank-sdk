@@ -9,10 +9,26 @@ pub fn empty_pattern() -> Pattern {
     std::array::from_fn(|_| std::array::from_fn(|_| Beat::default()))
 }
 
+pub const FX_ID_NONE: u8 = 0;
+pub const FX_ID_INSTRUMENT: u8 = 1;
+pub const FX_ID_ARPEGGIO: u8 = 2;
+pub const MAX_INSTRUMENT_INDEX: u8 = 10;
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Beat {
     pub cmd_list: Vec<ChannelCmd>,
     pub sqc: Option<SequencerCmd>,
+}
+
+impl Beat {
+    // Returns the active channel Fx command (if any) as (fx_id, x, y)
+    pub fn fx(&self) -> Option<(u8, u8, Option<u8>)> {
+        self.cmd_list.iter().find_map(|c| match c {
+            ChannelCmd::Instrument(x) => Some((FX_ID_INSTRUMENT, *x, None)),
+            ChannelCmd::Arpeggio(x, y) => Some((FX_ID_ARPEGGIO, *x, *y)),
+            _ => None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +50,7 @@ pub enum ChannelCmd {
     Note(String),
     NoteOff,
     Phase(u16),
+    Instrument(u8),
     Arpeggio(u8, Option<u8>),
     // SlidePitch(u8, i16),
     // SlideVol(u8, i16),

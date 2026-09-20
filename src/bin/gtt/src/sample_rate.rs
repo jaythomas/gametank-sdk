@@ -3,8 +3,8 @@
 /// Audio coprocessor clock frequency (NTSC colorburst-derived).
 pub const CPU_FREQ: f64 = 3_579_545.0;
 
-/// $C9 = ~24186Hz, using 584 cycles out of the 592-cycle budget
-pub const SAMPLE_RATE_REG: u8 = 0xC9;
+/// $CB = ~23550Hz
+pub const SAMPLE_RATE_REG: u8 = 0xCB;
 
 /// Resolve a hardware `audio_freq` register value to its real
 /// output sample rate in Hz.

@@ -52,17 +52,20 @@ BEAT  SEQ  ch0 v ::↗↘   ch1 v ::↗↘   ...
 The total set of beats on screen represents a **pattern**.
 The number of beats in the pattern can be adjusted on the control deck or via the command palette `:beats [1-255]`.
 
-**SEQ** is the leftmost lane. Sequence Commands are track-wide. They affect all channels unless a channel explicitly overrides the command. Use Enter/Up/Down/Esc on a SEQ cell to select a sequencer command.
+**SEQ** is the leftmost lane. Sequence Commands are track-wide.
+They affect all channels unless a channel explicitly overrides the command.
+They are processed at the start of a beat before any voices.
+Use Enter/Up/Down/Esc on a SEQ cell to select a sequencer command.
 
 | ID | Label           | Parameters                                     | Description           |
 | -- | -----           | ----------                                     | -----------           |
 | 0  | (no effect)     |                                                |                       |
 | 1  | `[S]top`        | (none)                                         | Ends track playback   |
 | 2  | `[T]empo`       | x = tempo                                      | Updates the track BPM |
-| 3  | `F[x]Speed`     | x (00-1F) = number of ticks                    | How many ticks a second effects will run at. (Less is faster.) A channel Arpeggio effect will count a number of ticks/frames before the next note in the Arpeggio is played. |
+| 3  | `F[x]Speed`     | x (00-1F) = number of ticks per beat           | How many ticks per beat channel effects advance. (Higher is faster.) |
 | 4  | `[#] FlowCount` | x (00-FF) = value for "count" register         | Replace the value of the count register. Any number greater than 0 will trigger the conditional "CountJump". | 
 | 5  | `Count[j]ump`   | x (00-FF) = pattern idx, y (00-FF) = beat idx  | When the count register is greater than 0, jump to the given pattern+beat, then decrement the count register by 1. Essential for looping a section of track a finite number of times. When the register is 0, this command does nothing. |
-| 6  | `[J]ump`        | x (00-FF) = pattern idx, y (00-FF) = beat idx  | Unconditionally jump to a given pattern and beat. Useful for jumping to the next pattern or looping a track indefinitely. |
+| 6  | `[J]ump`        | x (00-FF) = pattern idx, y (00-FF) = beat idx  | Unconditionally jump to a given pattern and beat. Useful for jumping to the next pattern or looping a track indefinitely. Note that jumps happen before the target beat is processed. |
 
 
 **Notes**: select the column with the channel number (ie ch0) and use the top row of letters and numbers for note entry.
@@ -85,13 +88,13 @@ See the [Tuning editor](#tuning-editor) for how to update these mappings.
 
 **v** represents volume. Entered as a two-digit hexadecimal value from `00` to `3F` (0-63 decimal). Type 0-9/A-F to set digits or `-`/`=` to decrement/increment. The last set volume carries to the next note, even if a note OFF is set along the way.
 
-**Fx** lets you apply effects per channel.
+**Fx** lets you apply effects per channel. Effects apply at the start of the beat before the note is processed.
 
 | ID | Label       | Parameters                                               | Description                                    |
 | -- | -----       | ----------                                               | -----------                                    |
 | 0  | (no effect) |                                                          |                                                |
 | 1  | Instrument  | x (0-F) = instrument index                               | Switch which instrument this channel is using. |
-| 2  | Arpeggio    | x (0-F) = how many steps up to the second note,<br>y (0-F) = optional, steps up for a third note. | The arpeggiation holds each note the number of ticks set by the FxSpeed. |
+| 2  | Arpeggio    | x (0-F) = how many steps up to the second note,<br>y (0-F) = optional, steps up for a third note. | The arpeggiation steps to its next note once per tick, and FxSpeed sets how many ticks occur per beat. So an FxSpeed of `05` yields 3 ticks/notes a beat. |
 | 3  | PitchUp     | x (00-FF) = how many steps up to slide to | Portamento that increments at a rate of FxSpeed.              |
 | 4  | PitchDown   | x (00-FF) = how many steps down to slide to | Portamento that increments at a rate of FxSpeed.            |
 | 5  | FadeIn      | x (00-3B) = how many ticks to hold each volume increment | Play note with a volume of 0 and raise volume up to the volume level set for that beat. |
@@ -184,30 +187,39 @@ Just click `[cancel]` or `[save]` when done.
 Clicking **Export** creates a `<name>-export/` folder next to your gt-tracker file:
 
 ```
-mysong-export/
+mycooltrack-export/
   instruments/         instrument raw waveform files
-  wave.asm             assembly to import instruments
-  mysong.asm           pattern data, ready for the GameTank linker
+  mycooltrack.bin      pattern data, ready to embed
 ```
 
 Follow the instructions for your SDK on how to incorporate the track data into your project.
 
-- C SDK: TODO
+- [C SDK](https://github.com/clydeshaffer/gametank_sdk)
 - [Rust SDK](https://github.com/dwbrite/gametank-sdk)
 
 
 ## Track descriptor reference
 
-The `<name>_track` symbol is a 7-byte binary descriptor:
+The exported `<name>-export/<name>.bin` is made of three parts:
 
-| offset | type  | field           | description                                    |
-| ------ | ----  | -----           | -----------                                    |
-| 0      | `u16` | `bpm`           | Base tempo, beats per minute                   |
-| 2      | `u16` | `speed`         | FxSpeed. Track-wide number of ticks per effect |
-| 4      | `u8`  | `pattern_count` | Number of unique patterns                      |
-| 5      | `u16` | `patterns`      | Pointer to `u16[]` of pattern data pointers    |
+**1. Header** fixed at 5 bytes, starting at offset 0.
 
-Each entry in `patterns` points to a pattern data block laid out as:
+| offset | type  | field           | description                                     |
+| ------ | ----  | -----           | -----------                                     |
+| 0      | `u16` | `bpm`           | Base tempo, beats per minute                    |
+| 2      | `u16` | `speed`         | FxSpeed. Track-wide number of ticks per effect  |
+| 4      | `u8`  | `pattern_count` | Number of unique patterns                       |
+
+**2. Patterns table** immediately follows the header at byte offset 5. It is a variable-sized array where each entry tells the location of the pattern data block for the given pattern index.
+
+| index                | type  | value                                                              |
+| -------------------- | ----  | -----                                                              |
+| 0                    | `u16` | Offset from the start of the file to pattern 0's data block        |
+| 1                    | `u16` | Offset from the start of the file to pattern 1's data block (i.e. pattern 0's offset + pattern 0's `pattern_size`) |
+| ...                  | ...   | ...                                                                |
+| `pattern_count - 1`  | `u16` | Offset from the start of the file to the last pattern's data block |
+
+**3. Pattern data blocks**, one per table entry above. Located at the offset given by that entry. Each block is laid out as:
 
 > [0] beats: u8 (row count for this pattern)
 > per channel, each array sized to `beats` bytes:
@@ -220,3 +232,4 @@ Each entry in `patterns` points to a pattern data block laid out as:
 >  seq_cmd_type[beats]              equal to the sequence command ID (see SEQ definitions above); 0 = no command
 >  seq_cmd_value[beats]             raw command value (unused for Stop; pattern index for CountJump)
 >  seq_cmd_value2[beats]            second raw command value (only used for CountJump: target beat)
+

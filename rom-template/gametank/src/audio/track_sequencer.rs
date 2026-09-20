@@ -1,6 +1,37 @@
-use super::wavetable_8ch::{voices, VOICE_COUNT, WAVETABLE};
+use super::wavetable_8ch::{VOICE_COUNT, WAVETABLE, voices};
+use crate::console::Console;
 
-const SAMPLE_RATE_REG: u8 = 0xC9;
+const SAMPLE_RATE_REG: u8 = 0xCB;
+
+macro_rules! instrument_table {
+    ($n:literal) => {
+        *include_bytes!(concat!(
+            // gt-tracker's exported `instruments/` folder
+            "../../../assets/instruments/instrument_",
+            $n,
+            ".raw"
+        ))
+    };
+}
+
+// The 11 fixed instrument slots don't fit in FIXED_FLASH
+// alongside everything else, so they're placed in bank 125.
+const INSTRUMENT_BANK: u8 = 125;
+
+#[unsafe(link_section = ".rodata.bank125")]
+static INSTRUMENT_TABLES: [[u8; 256]; 11] = [
+    instrument_table!(1),
+    instrument_table!(2),
+    instrument_table!(3),
+    instrument_table!(4),
+    instrument_table!(5),
+    instrument_table!(6),
+    instrument_table!(7),
+    instrument_table!(8),
+    instrument_table!(9),
+    instrument_table!(10),
+    instrument_table!(11),
+];
 
 // Number of parallel per-beat arrays packed into each channel's slice of a
 // pattern's data block:
@@ -23,18 +54,6 @@ const ARP_NO_THIRD_NOTE: u8 = 0xFF;
 /// Drives the 8-channel wavetable synth from a gt-tracker export. Create one
 /// sequencer per track, point it at the `<name>_track` descriptor, then call
 /// `init_voices` once after loading the firmware and `tick` once per frame.
-///
-/// ```rust,ignore
-/// unsafe extern "C" { static mysong_track: u8; }
-///
-/// let mut sequencer = TrackSequencer::new(unsafe { &mysong_track as *const u8 });
-/// sequencer.init_voices();
-///
-/// loop {
-///     unsafe { wait(); }
-///     sequencer.tick();
-/// }
-/// ```
 pub struct TrackSequencer {
     track: *const u8,
     beat: u8,
@@ -65,7 +84,7 @@ static mut ARP_STEP: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
 const TRACK_BPM_OFFSET: usize = 0;
 const TRACK_SPEED_OFFSET: usize = 2;
 const TRACK_PATTERN_COUNT_OFFSET: usize = 4;
-const TRACK_PATTERNS_PTR_OFFSET: usize = 5;
+const TRACK_HEADER_SIZE: usize = 5;
 
 // seq_cmd_type values baked into each pattern's trailing per-beat arrays
 const SEQ_CMD_STOP: u8 = 1;
@@ -96,10 +115,15 @@ impl TrackSequencer {
         }
     }
 
-    // Point each voice at its corresponding instrument wavetable, mute all
-    // voices, and set the audio_freq register to the rate gt-tracker exports
-    // assume. TODO: channels should default to the first instrument perhaps?
-    pub fn init_voices(&self) {
+    // Load the gt-tracker instrument tables into ACP RAM,
+    // point each voice at a wavetable, mute all voices,
+    // and set the audio_freq register. TODO: channels
+    // should default to the first instrument perhaps?
+    pub fn init_voices(&self, console: &mut Console, restore_bank: u8) {
+        console.set_rom_bank(INSTRUMENT_BANK);
+        console.audio.load_instruments(&INSTRUMENT_TABLES);
+        console.set_rom_bank(restore_bank);
+
         let v = voices();
         for i in 0..VOICE_COUNT {
             v[i].set_wavetable(WAVETABLE[i]);
@@ -161,8 +185,9 @@ impl TrackSequencer {
     }
 
     fn pattern_ptr(&self, pattern_idx: u8) -> *const u8 {
-        let pat_table = unsafe { read_u16(self.track, TRACK_PATTERNS_PTR_OFFSET) } as *const u16;
-        unsafe { read_ptr(pat_table, pattern_idx as usize) as *const u8 }
+        let table = unsafe { self.track.add(TRACK_HEADER_SIZE) as *const u16 };
+        let pattern_offset = unsafe { read_ptr(table, pattern_idx as usize) } as usize;
+        unsafe { self.track.add(pattern_offset) }
     }
 
     // Processes sequence and channel commands for the current pattern_idx+beat

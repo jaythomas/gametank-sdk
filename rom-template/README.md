@@ -88,21 +88,21 @@ See `gametank/src/audio/mod.rs` and `gametank/src/audio/fm_4ch/mod.rs` for more 
 
 ### Importing gt-tracker tracks
 
-1. Follow the `gtt` instructions for creating and exporting a track.
-2. Copy the exported `instruments/` folder and `wave.asm` into the firmware source directory, replacing the existing ones: `gametank/audiofw-src/wavetable-8ch/`
-3. Copy the pattern data (my-song.asm file) into the assembly source folder, `src/asm/`. The next `cargo build` will reassemble the firmware and any tracks in `src/asm/`
-4. Use `gametank::audio::TrackSequencer` in your main loop
+1. Follow the `gtt` instructions for creating and exporting a track
+2. Copy the exported `instruments/` folder and `<track name>.bin` into `assets/`
+3. Use `gametank::audio::TrackSequencer` in your main loop
 
 ```rust
 use gametank::audio::{FIRMWARE, TrackSequencer};
 
-unsafe extern "C" { static mysong_track: u8; }  // defined in src/asm/mysong.asm
+static MY_MELODY: &[u8] = include_bytes!("../assets/my_melody.bin");
 
 fn main(console: &mut Console) {
     console.audio.load_firmware(FIRMWARE);
 
-    let mut sequencer = TrackSequencer::new(unsafe { &mysong_track as *const u8 });
-    sequencer.init_voices();
+    let mut sequencer = TrackSequencer::new(MY_MELODY.as_ptr());
+    // Loads instruments into RAM then (re-)activate the next needed ROM bank
+    sequencer.init_voices(console, 127);
 
     loop {
         unsafe { wait_vblank(); }

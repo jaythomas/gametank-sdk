@@ -31,10 +31,10 @@ impl AudioManager {
     ///
     /// `tables[i]` (a 256-byte raw waveform, e.g. exported by gt-tracker)
     /// is written to `WAVETABLE[i]`. Call this after [`load_firmware`](Self::load_firmware).
-    pub fn load_instruments(&mut self, tables: &[&[u8; 256]]) {
+    pub fn load_instruments(&mut self, tables: &[[u8; 256]]) {
         for (i, table) in tables.iter().enumerate().take(WAVETABLE.len()) {
             let base = WAVETABLE[i] as usize;
-            self.aram[base..base + 256].copy_from_slice(table.as_slice());
+            self.aram[base..base + 256].copy_from_slice(table);
         }
     }
 }

@@ -149,14 +149,14 @@ impl TrackSequencer {
                 remaining -= 1;
             }
 
-            while self.tick_acc >= 3600 {
-                self.tick_acc -= 3600;
+            while self.tick_acc >= 1800 {
+                self.tick_acc -= 1800;
                 self.advance_tick();
             }
         }
 
-        if self.frame_acc >= 3600 {
-            self.frame_acc -= 3600;
+        if self.frame_acc >= 1800 {
+            self.frame_acc -= 1800;
             self.advance_beat();
         }
     }

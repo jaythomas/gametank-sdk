@@ -103,7 +103,7 @@ impl PlayerInner {
         let acp_sample_rate = CPU_FREQ / sample_rate_reg as f64;
         let audio_out = GameTankAudio::new(acp_sample_rate, output_sample_rate);
 
-        let samples_per_beat = output_sample_rate * 60.0 / (bpm.max(1) as f64);
+        let samples_per_beat = output_sample_rate * 30.0 / (bpm.max(1) as f64);
         let fx_speed: u8 = 6;
         let samples_per_tick = samples_per_beat / fx_speed.max(1) as f64;
 
@@ -195,7 +195,7 @@ impl PlayerInner {
                 }
                 PlayerCmd::SetBpm(bpm) => {
                     self.bpm = bpm;
-                    self.samples_per_beat = self.output_sample_rate * 60.0 / (bpm.max(1) as f64);
+                    self.samples_per_beat = self.output_sample_rate * 30.0 / (bpm.max(1) as f64);
                     self.recompute_tick_timing();
                 }
                 PlayerCmd::SetFxSpeed(fx_speed) => {
@@ -237,8 +237,6 @@ impl PlayerInner {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
             (*aram_ptr)[base + 2] = (freq & 0xFF) as u8;
             (*aram_ptr)[base + 3] = (freq >> 8) as u8;
-            (*aram_ptr)[base] = 0;
-            (*aram_ptr)[base + 1] = 0;
         }
     }
 
@@ -315,7 +313,7 @@ impl PlayerInner {
                 }
             }
         }
-        self.samples_per_beat = self.output_sample_rate * 60.0 / (self.bpm.max(1) as f64);
+        self.samples_per_beat = self.output_sample_rate * 30.0 / (self.bpm.max(1) as f64);
         self.recompute_tick_timing();
     }
 
@@ -338,7 +336,7 @@ impl PlayerInner {
                     SequencerCmd::Tempo(bpm) => {
                         self.bpm = bpm as u16;
                         self.samples_per_beat =
-                            self.output_sample_rate * 60.0 / (self.bpm.max(1) as f64);
+                            self.output_sample_rate * 30.0 / (self.bpm.max(1) as f64);
                         self.recompute_tick_timing();
                     }
                     SequencerCmd::FxSpeed(fx_speed) => {

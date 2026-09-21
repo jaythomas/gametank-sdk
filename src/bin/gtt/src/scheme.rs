@@ -66,22 +66,14 @@ impl Scheme {
         Style::new().bg(color).fg(self.text_color(color))
     }
 
-    fn rate_text_color(&self, color: Color) -> Option<bool> {
+    pub fn text_color(&self, color: Color) -> Color {
         match color {
             Color::Rgb(r, g, b) => {
                 let grey = r as f32 * 0.3 + g as f32 * 0.59 + b as f32 * 0.11;
-                Some(grey < 105.0)
+                if grey < 105.0 { self.white[3] } else { self.black[0] }
             }
-            Color::Reset => None,
-            _ => Some(true),
-        }
-    }
-
-    pub fn text_color(&self, color: Color) -> Color {
-        match self.rate_text_color(color) {
-            None => Color::Reset,
-            Some(true) => self.white[3],
-            Some(false) => self.black[0],
+            Color::Reset => Color::Reset,
+            _ => self.white[3],
         }
     }
 }

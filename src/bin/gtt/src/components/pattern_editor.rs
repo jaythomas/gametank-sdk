@@ -19,8 +19,9 @@ use crate::{
     lane::{Lane, LaneKind},
     scheme::SCHEME,
     tracker::{
-        Beat, ChannelCmd, FX_ID_ARPEGGIO, FX_ID_INSTRUMENT, MAX_INSTRUMENT_INDEX, Pattern,
-        SequencerCmd,
+        Beat, ChannelCmd, FX_ID_ARPEGGIO, FX_ID_FADE_IN, FX_ID_FADE_OUT, FX_ID_INSTRUMENT,
+        FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, FX_ID_TREMBLE, FX_TICKS_MAX, MAX_FX_ID,
+        MAX_INSTRUMENT_INDEX, Pattern, SequencerCmd,
     },
 };
 
@@ -122,6 +123,18 @@ fn seq_choice_default(idx: usize) -> Option<SequencerCmd> {
     }
 }
 
+fn fx_x_max(fx_id: u8) -> u8 {
+    match fx_id {
+        FX_ID_INSTRUMENT => MAX_INSTRUMENT_INDEX,
+        FX_ID_FADE_IN | FX_ID_FADE_OUT | FX_ID_TREMBLE => FX_TICKS_MAX,
+        _ => 0xFF,
+    }
+}
+
+fn fx_digit_cap(fx_id: u8) -> u8 {
+    if fx_id == FX_ID_ARPEGGIO { 3 } else { 2 }
+}
+
 #[derive(Default, Clone, Copy)]
 struct ViewLayout {
     outer: Rect,
@@ -177,9 +190,6 @@ impl PatternEditor {
                 Lane::note(6),
                 Lane::vol(6),
                 Lane::fx(6),
-                Lane::note(7),
-                Lane::vol(7),
-                Lane::fx(7),
             ],
             transpose: 0,
             sel_x: 2,
@@ -290,7 +300,13 @@ impl CellDisplay {
             },
             CellDisplay::Fx(fx) => match fx {
                 None => "---".to_string(),
-                Some((id, x, y)) => format!("{:01X}{:01X}{}", id, x, y.map(|y| format!("{:01X}", y)).unwrap_or_else(|| "-".to_string())),
+                Some((id, x, y)) if *id == FX_ID_ARPEGGIO => format!(
+                    "{:01X}{:01X}{}",
+                    id,
+                    x,
+                    y.map(|y| format!("{:01X}", y)).unwrap_or_else(|| "-".to_string())
+                ),
+                Some((id, x, _)) => format!("{:01X}{:02X}", id, x),
             },
         }
     }
@@ -630,31 +646,47 @@ impl Component for PatternEditor {
                             _ => (0, 0, None, 0),
                         };
 
-                        match digits_typed {
-                            0 => {
-                                if digit > FX_ID_ARPEGGIO {
-                                    continue;
-                                }
-                                fx_id = digit;
+                        if digits_typed == 0 {
+                            if digit > MAX_FX_ID {
+                                continue;
                             }
-                            1 => {
-                                if fx_id == FX_ID_INSTRUMENT && digit > MAX_INSTRUMENT_INDEX {
-                                    continue;
-                                }
+                            fx_id = digit;
+                            fx_x = 0;
+                            fx_y = None;
+                        } else if fx_id == FX_ID_ARPEGGIO {
+                            if digits_typed == 1 {
                                 fx_x = digit;
+                            } else {
+                                fx_y = Some(digit);
                             }
-                            _ => fx_y = Some(digit),
+                        } else {
+                            fx_x = ((fx_x % 16) * 16 + digit).min(fx_x_max(fx_id));
                         }
-                        let digits_typed = (digits_typed + 1).min(3);
+                        let digits_typed = (digits_typed + 1).min(fx_digit_cap(fx_id));
                         self.fx_edit = Some((cell, digits_typed));
 
                         let pattern = file.current_pattern_mut(self.pattern_idx);
                         let beat = &mut pattern[channel + 1][row];
-                        beat.cmd_list
-                            .retain(|c| !matches!(c, ChannelCmd::Instrument(_) | ChannelCmd::Arpeggio(_, _)));
+                        beat.cmd_list.retain(|c| {
+                            !matches!(
+                                c,
+                                ChannelCmd::Instrument(_)
+                                    | ChannelCmd::Arpeggio(_, _)
+                                    | ChannelCmd::PitchUp(_)
+                                    | ChannelCmd::PitchDown(_)
+                                    | ChannelCmd::FadeIn(_)
+                                    | ChannelCmd::FadeOut(_)
+                                    | ChannelCmd::Tremble(_)
+                            )
+                        });
                         match fx_id {
                             FX_ID_INSTRUMENT => beat.cmd_list.push(ChannelCmd::Instrument(fx_x)),
                             FX_ID_ARPEGGIO => beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y)),
+                            FX_ID_PITCH_UP => beat.cmd_list.push(ChannelCmd::PitchUp(fx_x)),
+                            FX_ID_PITCH_DOWN => beat.cmd_list.push(ChannelCmd::PitchDown(fx_x)),
+                            FX_ID_FADE_IN => beat.cmd_list.push(ChannelCmd::FadeIn(fx_x)),
+                            FX_ID_FADE_OUT => beat.cmd_list.push(ChannelCmd::FadeOut(fx_x)),
+                            FX_ID_TREMBLE => beat.cmd_list.push(ChannelCmd::Tremble(fx_x)),
                             _ => {}
                         }
                     }
@@ -663,9 +695,14 @@ impl Component for PatternEditor {
                         kind: KeyEventKind::Press,
                         ..
                     }) if keybinds::CLEAR.contains(code) => {
+                        let existing_id = file.current_pattern(self.pattern_idx)[channel + 1][row]
+                            .fx()
+                            .map(|(id, _, _)| id)
+                            .unwrap_or(0);
                         let digits_typed = match self.fx_edit {
                             Some((c, n)) if c == cell => n,
-                            _ => 3,
+                            _ if existing_id == 0 => 0,
+                            _ => fx_digit_cap(existing_id),
                         };
 
                         if digits_typed == 0 {
@@ -690,7 +727,16 @@ impl Component for PatternEditor {
                             let pattern = file.current_pattern_mut(self.pattern_idx);
                             let beat = &mut pattern[channel + 1][row];
                             beat.cmd_list.retain(|c| {
-                                !matches!(c, ChannelCmd::Instrument(_) | ChannelCmd::Arpeggio(_, _))
+                                !matches!(
+                                    c,
+                                    ChannelCmd::Instrument(_)
+                                        | ChannelCmd::Arpeggio(_, _)
+                                        | ChannelCmd::PitchUp(_)
+                                        | ChannelCmd::PitchDown(_)
+                                        | ChannelCmd::FadeIn(_)
+                                        | ChannelCmd::FadeOut(_)
+                                        | ChannelCmd::Tremble(_)
+                                )
                             });
                             match fx_id {
                                 FX_ID_INSTRUMENT => {
@@ -699,6 +745,13 @@ impl Component for PatternEditor {
                                 FX_ID_ARPEGGIO => {
                                     beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y))
                                 }
+                                FX_ID_PITCH_UP => beat.cmd_list.push(ChannelCmd::PitchUp(fx_x)),
+                                FX_ID_PITCH_DOWN => {
+                                    beat.cmd_list.push(ChannelCmd::PitchDown(fx_x))
+                                }
+                                FX_ID_FADE_IN => beat.cmd_list.push(ChannelCmd::FadeIn(fx_x)),
+                                FX_ID_FADE_OUT => beat.cmd_list.push(ChannelCmd::FadeOut(fx_x)),
+                                FX_ID_TREMBLE => beat.cmd_list.push(ChannelCmd::Tremble(fx_x)),
                                 _ => {}
                             }
                         }
@@ -896,7 +949,7 @@ impl Component for PatternEditor {
             SCHEME.orange[3],
             SCHEME.yellow[3],
             SCHEME.green[3],
-            SCHEME.deepblue[3],
+            // SCHEME.deepblue[3],
             SCHEME.blue[3],
             SCHEME.purple[3],
             SCHEME.magenta[3],

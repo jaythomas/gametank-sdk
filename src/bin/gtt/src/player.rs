@@ -16,7 +16,7 @@ const FIRMWARE: &[u8; 4096] =
     include_bytes!("../../../../rom-template/gametank/audiofw/wavetable-8ch.bin");
 
 const ROWS_PER_PATTERN: usize = 64;
-const AUDIO_CHANNELS: usize = 8;
+const AUDIO_CHANNELS: usize = 7;
 const CPU_FREQ: f64 = 3_579_545.0;
 
 const WAVETABLE: [u16; NUM_INSTRUMENTS] = [
@@ -379,6 +379,16 @@ impl PlayerInner {
         }
     }
 
+    fn apply_pitch_up(&mut self, _ch: usize, _steps: u8) {}
+
+    fn apply_pitch_down(&mut self, _ch: usize, _steps: u8) {}
+
+    fn apply_fade_in(&mut self, _ch: usize, _speed: u8) {}
+
+    fn apply_fade_out(&mut self, _ch: usize, _speed: u8) {}
+
+    fn apply_tremble(&mut self, _ch: usize, _speed: u8) {}
+
     fn trigger_channels(&mut self, pattern_idx: usize, row: usize) {
         for ch in 0..AUDIO_CHANNELS {
             let beat = &self.patterns[pattern_idx][ch + 1][row];
@@ -402,10 +412,45 @@ impl PlayerInner {
                 ChannelCmd::Instrument(idx) => Some(*idx as usize),
                 _ => None,
             });
+            let maybe_pitch_up = beat.cmd_list.iter().find_map(|c| match c {
+                ChannelCmd::PitchUp(x) => Some(*x),
+                _ => None,
+            });
+            let maybe_pitch_down = beat.cmd_list.iter().find_map(|c| match c {
+                ChannelCmd::PitchDown(x) => Some(*x),
+                _ => None,
+            });
+            let maybe_fade_in = beat.cmd_list.iter().find_map(|c| match c {
+                ChannelCmd::FadeIn(x) => Some(*x),
+                _ => None,
+            });
+            let maybe_fade_out = beat.cmd_list.iter().find_map(|c| match c {
+                ChannelCmd::FadeOut(x) => Some(*x),
+                _ => None,
+            });
+            let maybe_tremble = beat.cmd_list.iter().find_map(|c| match c {
+                ChannelCmd::Tremble(x) => Some(*x),
+                _ => None,
+            });
 
             if let Some(idx) = maybe_instrument {
                 self.current_instrument[ch] = idx;
                 self.set_voice_waveptr(ch, idx);
+            }
+            if let Some(x) = maybe_pitch_up {
+                self.apply_pitch_up(ch, x);
+            }
+            if let Some(x) = maybe_pitch_down {
+                self.apply_pitch_down(ch, x);
+            }
+            if let Some(x) = maybe_fade_in {
+                self.apply_fade_in(ch, x);
+            }
+            if let Some(x) = maybe_fade_out {
+                self.apply_fade_out(ch, x);
+            }
+            if let Some(x) = maybe_tremble {
+                self.apply_tremble(ch, x);
             }
 
             if let Some(v) = maybe_vol {

@@ -3,9 +3,12 @@ use std::path::Path;
 
 use crate::file::{NUM_INSTRUMENTS, TrackerFile};
 use crate::sample_rate::{SAMPLE_RATE_REG, sample_rate_reg_to_hz};
-use crate::tracker::{ChannelCmd, FX_ID_ARPEGGIO, FX_ID_INSTRUMENT, FX_ID_NONE, SequencerCmd};
+use crate::tracker::{
+    ChannelCmd, FX_ID_ARPEGGIO, FX_ID_FADE_IN, FX_ID_FADE_OUT, FX_ID_INSTRUMENT, FX_ID_NONE,
+    FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, FX_ID_TREMBLE, SequencerCmd,
+};
 
-const CHANNELS: usize = 8;
+const CHANNELS: usize = 7;
 
 const VOL_NO_CHANGE: u8 = 0xFF;
 
@@ -96,6 +99,26 @@ fn bake_pattern(
                         fx_id = FX_ID_ARPEGGIO;
                         fx_x = *x;
                         fx_y = y.unwrap_or(ARP_NO_THIRD_NOTE);
+                    }
+                    ChannelCmd::PitchUp(x) => {
+                        fx_id = FX_ID_PITCH_UP;
+                        fx_x = *x;
+                    }
+                    ChannelCmd::PitchDown(x) => {
+                        fx_id = FX_ID_PITCH_DOWN;
+                        fx_x = *x;
+                    }
+                    ChannelCmd::FadeIn(x) => {
+                        fx_id = FX_ID_FADE_IN;
+                        fx_x = *x;
+                    }
+                    ChannelCmd::FadeOut(x) => {
+                        fx_id = FX_ID_FADE_OUT;
+                        fx_x = *x;
+                    }
+                    ChannelCmd::Tremble(x) => {
+                        fx_id = FX_ID_TREMBLE;
+                        fx_x = *x;
                     }
                     _ => {}
                 }
@@ -221,3 +244,4 @@ pub fn export_all(
 
     Ok(())
 }
+

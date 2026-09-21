@@ -66,9 +66,9 @@ where
     let vecs: Vec<Vec<Vec<Beat>>> = Vec::deserialize(deserializer)?;
     let mut patterns = Vec::new();
     for pattern_vec in vecs {
-        if pattern_vec.len() != 9 {
+        if pattern_vec.len() != 8 {
             return Err(D::Error::custom(format!(
-                "Expected 9 channels, got {}",
+                "Expected 8 channels, got {}",
                 pattern_vec.len()
             )));
         }
@@ -305,3 +305,4 @@ impl TrackerFile {
         std::fs::write(path, bytes)
     }
 }
+

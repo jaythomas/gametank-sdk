@@ -49,9 +49,20 @@ const CHANNEL_ARRAYS: usize = 10;
 
 const FX_ID_INSTRUMENT: u8 = 1;
 const FX_ID_ARPEGGIO: u8 = 2;
+const FX_ID_PITCH_UP: u8 = 3;
+const FX_ID_PITCH_DOWN: u8 = 4;
+const FX_ID_FADE_IN: u8 = 5;
+const FX_ID_FADE_OUT: u8 = 6;
+const FX_ID_TREMBLE: u8 = 7;
 const ARP_NO_THIRD_NOTE: u8 = 0xFF;
 
-/// Drives the 8-channel wavetable synth from a gt-tracker export. Create one
+fn apply_pitch_up(_ch: usize, _steps: u8) {}
+fn apply_pitch_down(_ch: usize, _steps: u8) {}
+fn apply_fade_in(_ch: usize, _speed: u8) {}
+fn apply_fade_out(_ch: usize, _speed: u8) {}
+fn apply_tremble(_ch: usize, _speed: u8) {}
+
+/// Drives the 7-channel wavetable synth from a gt-tracker export. Create one
 /// sequencer per track, point it at the `<name>_track` descriptor, then call
 /// `init_voices` once after loading the firmware and `tick` once per frame.
 pub struct TrackSequencer {
@@ -204,13 +215,7 @@ impl TrackSequencer {
 
             let beat = self.beat as usize;
 
-            let seq_cmd_base = {
-                let mut b = 0usize;
-                for _ in 0..VOICE_COUNT {
-                    b += channel_stride;
-                }
-                b
-            };
+            let seq_cmd_base = mul_by_const(channel_stride, VOICE_COUNT);
             let off_seq_cmd_type = 0usize;
             let off_seq_cmd_value = off_seq_cmd_type + pattern_beats;
             let off_seq_cmd_value2 = off_seq_cmd_value + pattern_beats;
@@ -310,8 +315,14 @@ impl TrackSequencer {
                 }
                 any_active = true;
             } else {
-                if fx_id == FX_ID_INSTRUMENT {
-                    v[ch].set_wavetable(WAVETABLE[fx_x as usize]);
+                match fx_id {
+                    FX_ID_INSTRUMENT => v[ch].set_wavetable(WAVETABLE[fx_x as usize]),
+                    FX_ID_PITCH_UP => apply_pitch_up(ch, fx_x),
+                    FX_ID_PITCH_DOWN => apply_pitch_down(ch, fx_x),
+                    FX_ID_FADE_IN => apply_fade_in(ch, fx_x),
+                    FX_ID_FADE_OUT => apply_fade_out(ch, fx_x),
+                    FX_ID_TREMBLE => apply_tremble(ch, fx_x),
+                    _ => {}
                 }
                 unsafe {
                     ARP_ACTIVE[ch] = false;
@@ -322,6 +333,19 @@ impl TrackSequencer {
         }
         self.arp_active_any = any_active;
     }
+}
+
+fn mul_by_const(x: usize, mut n: usize) -> usize {
+    let mut acc = 0usize;
+    let mut shifted = x;
+    while n > 0 {
+        if n & 1 != 0 {
+            acc += shifted;
+        }
+        shifted <<= 1;
+        n >>= 1;
+    }
+    acc
 }
 
 unsafe fn read_u16(base: *const u8, offset: usize) -> u16 {

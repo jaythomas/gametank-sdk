@@ -42,6 +42,7 @@ impl TrackerContainer {
         control_deck.set_names(&file.instrument_names());
         control_deck.set_bpm(file.bpm);
         control_deck.set_fx_speed(file.fx_speed);
+        control_deck.set_beats(file.beats_for(0));
         let mut pattern_editor = PatternEditor::init();
         pattern_editor.set_tuning(file.tuning.clone());
         let mut tc = TrackerContainer {

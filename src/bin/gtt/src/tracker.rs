@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-pub const PATTERN_TABLE_WIDTH: u16 = 117;
+pub const PATTERN_TABLE_WIDTH: u16 = 104;
 pub const PATTERN_BEATS: usize = 64;
 
-pub type Pattern = [[Beat; PATTERN_BEATS]; 9];
+pub type Pattern = [[Beat; PATTERN_BEATS]; 8];
 
 pub fn empty_pattern() -> Pattern {
     std::array::from_fn(|_| std::array::from_fn(|_| Beat::default()))
@@ -12,7 +12,14 @@ pub fn empty_pattern() -> Pattern {
 pub const FX_ID_NONE: u8 = 0;
 pub const FX_ID_INSTRUMENT: u8 = 1;
 pub const FX_ID_ARPEGGIO: u8 = 2;
+pub const FX_ID_PITCH_UP: u8 = 3;
+pub const FX_ID_PITCH_DOWN: u8 = 4;
+pub const FX_ID_FADE_IN: u8 = 5;
+pub const FX_ID_FADE_OUT: u8 = 6;
+pub const FX_ID_TREMBLE: u8 = 7;
+pub const MAX_FX_ID: u8 = FX_ID_TREMBLE;
 pub const MAX_INSTRUMENT_INDEX: u8 = 10;
+pub const FX_TICKS_MAX: u8 = 0x3B;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Beat {
@@ -26,6 +33,11 @@ impl Beat {
         self.cmd_list.iter().find_map(|c| match c {
             ChannelCmd::Instrument(x) => Some((FX_ID_INSTRUMENT, *x, None)),
             ChannelCmd::Arpeggio(x, y) => Some((FX_ID_ARPEGGIO, *x, *y)),
+            ChannelCmd::PitchUp(x) => Some((FX_ID_PITCH_UP, *x, None)),
+            ChannelCmd::PitchDown(x) => Some((FX_ID_PITCH_DOWN, *x, None)),
+            ChannelCmd::FadeIn(x) => Some((FX_ID_FADE_IN, *x, None)),
+            ChannelCmd::FadeOut(x) => Some((FX_ID_FADE_OUT, *x, None)),
+            ChannelCmd::Tremble(x) => Some((FX_ID_TREMBLE, *x, None)),
             _ => None,
         })
     }
@@ -52,12 +64,11 @@ pub enum ChannelCmd {
     Phase(u16),
     Instrument(u8),
     Arpeggio(u8, Option<u8>),
-    // SlidePitch(u8, i16),
-    // SlideVol(u8, i16),
-    // StopPSlide,
-    // StopVSlide,
-    // Tremolo(u8, u8),
-    // Vibrato(u8, u8),
+    PitchUp(u8),
+    PitchDown(u8),
+    FadeIn(u8),
+    FadeOut(u8),
+    Tremble(u8),
     Volume(u8),
     Wavetable(u16),
 }

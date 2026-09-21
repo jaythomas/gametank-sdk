@@ -374,6 +374,13 @@ impl ControlDeck {
             .clamp(1, PATTERN_BEATS as u16) as u8
     }
 
+    pub fn set_beats(&mut self, beats: u8) {
+        let clamped = (beats as u16).clamp(1, PATTERN_BEATS as u16);
+        let s = format!("{:X}", clamped);
+        self.rows_input.set_value(s.clone());
+        self.rows_snapshot = s;
+    }
+
     pub fn mark_export_success(&mut self) {
         self.export_feedback_until = Some(Instant::now() + Duration::from_secs(3));
     }
@@ -1097,11 +1104,11 @@ impl Component for ControlDeck {
                                     Row::Instrument(i) => Row::Instrument(i - 1),
                                     Row::ActionTuning => Row::Instrument(NUM_INSTRUMENTS - 1),
                                     Row::ActionNewOpen => Row::ActionTuning,
-                                    Row::ActionQuit => Row::ActionNewOpen,
-                                    Row::ActionSave => Row::ActionQuit,
-                                    Row::ActionExport => Row::ActionSave,
-                                    Row::PatternPrev => Row::ActionExport,
-                                    Row::PatternNext => Row::PatternPrev,
+                                    Row::ActionQuit => Row::ActionTuning,
+                                    Row::ActionSave => Row::ActionNewOpen,
+                                    Row::ActionExport => Row::ActionQuit,
+                                    Row::PatternPrev => Row::ActionSave,
+                                    Row::PatternNext => Row::ActionExport,
                                     Row::PatternNew => Row::PatternPrev,
                                     Row::PatternCopy => Row::PatternNew,
                                     Row::PatternDelete => Row::PatternCopy,
@@ -1123,10 +1130,10 @@ impl Component for ControlDeck {
                                     }
                                     Row::Instrument(_) => Row::ActionTuning,
                                     Row::ActionTuning => Row::ActionNewOpen,
-                                    Row::ActionNewOpen => Row::ActionQuit,
-                                    Row::ActionQuit => Row::ActionSave,
-                                    Row::ActionSave => Row::ActionExport,
-                                    Row::ActionExport => Row::PatternPrev,
+                                    Row::ActionNewOpen => Row::ActionSave,
+                                    Row::ActionQuit => Row::ActionExport,
+                                    Row::ActionSave => Row::PatternPrev,
+                                    Row::ActionExport => Row::PatternNext,
                                     Row::PatternPrev => Row::PatternNew,
                                     Row::PatternNext => Row::PatternNew,
                                     Row::PatternNew => Row::PatternCopy,
@@ -1140,12 +1147,20 @@ impl Component for ControlDeck {
                             }
                             KeyCode::Left => {
                                 let row = self.selected_row;
-                                self.selected_col = self.selected_col.prev(row);
+                                match row {
+                                    Row::ActionQuit => self.selected_row = Row::ActionNewOpen,
+                                    Row::ActionExport => self.selected_row = Row::ActionSave,
+                                    _ => self.selected_col = self.selected_col.prev(row),
+                                }
                                 self.update_focus_states();
                             }
                             KeyCode::Right => {
                                 let row = self.selected_row;
-                                self.selected_col = self.selected_col.next(row);
+                                match row {
+                                    Row::ActionNewOpen => self.selected_row = Row::ActionQuit,
+                                    Row::ActionSave => self.selected_row = Row::ActionExport,
+                                    _ => self.selected_col = self.selected_col.next(row),
+                                }
                                 self.update_focus_states();
                             }
                             KeyCode::Enter => {
@@ -1499,7 +1514,7 @@ impl Component for ControlDeck {
         ])
         .split(actions_col);
 
-        const NEW_OPEN_BTN_W: u16 = 11;
+        const NEW_OPEN_BTN_W: u16 = 10;
         const QUIT_BTN_W: u16 = 6;
 
         let new_open_focused = sel_row == Row::ActionNewOpen;
@@ -1521,28 +1536,32 @@ impl Component for ControlDeck {
         };
         let export_btn_w = export_label.len() as u16;
 
+        let new_open_w = NEW_OPEN_BTN_W.min(action_rows[0].width);
         let new_open_area = Rect {
             x: action_rows[0].x,
             y: action_rows[0].y,
-            width: NEW_OPEN_BTN_W.min(action_rows[0].width),
+            width: new_open_w,
             height: 1,
         };
+        let quit_x = action_rows[0].x + new_open_w + 1;
         let quit_area = Rect {
+            x: quit_x,
+            y: action_rows[0].y,
+            width: QUIT_BTN_W.min(action_rows[0].width.saturating_sub(new_open_w + 1)),
+            height: 1,
+        };
+        let save_w = save_btn_w.min(action_rows[1].width);
+        let save_area = Rect {
             x: action_rows[1].x,
             y: action_rows[1].y,
-            width: QUIT_BTN_W.min(action_rows[1].width),
+            width: save_w,
             height: 1,
         };
-        let save_area = Rect {
-            x: action_rows[2].x,
-            y: action_rows[2].y,
-            width: save_btn_w.min(action_rows[2].width),
-            height: 1,
-        };
+        let export_x = action_rows[1].x + save_w + 1;
         let export_area = Rect {
-            x: action_rows[3].x,
-            y: action_rows[3].y,
-            width: export_btn_w.min(action_rows[3].width),
+            x: export_x,
+            y: action_rows[1].y,
+            width: export_btn_w.min(action_rows[1].width.saturating_sub(save_w + 1)),
             height: 1,
         };
 
@@ -1599,9 +1618,10 @@ impl Component for ControlDeck {
         let pattern_nav_row = action_rows[4];
         let pattern_prev_focused = sel_row == Row::PatternPrev;
         let pattern_next_focused = sel_row == Row::PatternNext;
+        const PATTERN_NAV_BTN_W: u16 = 5;
         let [pattern_prev_area, pattern_next_area, pattern_label_area] = Layout::horizontal([
-            Constraint::Length(BTN_W),
-            Constraint::Length(BTN_W),
+            Constraint::Length(PATTERN_NAV_BTN_W),
+            Constraint::Length(PATTERN_NAV_BTN_W),
             Constraint::Fill(1),
         ])
         .areas(pattern_nav_row);
@@ -1609,7 +1629,7 @@ impl Component for ControlDeck {
         self.pattern_prev_btn.focus.set(pattern_prev_focused);
         self.pattern_next_btn.focus.set(pattern_next_focused);
         frame.render_stateful_widget(
-            Button::new(Line::from("[<]").style(if pattern_prev_focused {
+            Button::new(Line::from("[<--]").style(if pattern_prev_focused {
                 btn_focus
             } else {
                 btn_base
@@ -1620,7 +1640,7 @@ impl Component for ControlDeck {
             &mut self.pattern_prev_btn,
         );
         frame.render_stateful_widget(
-            Button::new(Line::from("[>]").style(if pattern_next_focused {
+            Button::new(Line::from("[-->]").style(if pattern_next_focused {
                 btn_focus
             } else {
                 btn_base

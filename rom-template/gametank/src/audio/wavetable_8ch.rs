@@ -49,7 +49,7 @@ pub const VOICE_BASE: usize = 0x3041;
 /// Number of bytes per voice
 pub const VOICE_SIZE: usize = 7;
 /// Number of voices
-pub const VOICE_COUNT: usize = 8;
+pub const VOICE_COUNT: usize = 7;
 
 /// Base address for wavetables in ACP RAM (CPU-side)
 pub const WAVETABLE_BASE: usize = 0x3300;

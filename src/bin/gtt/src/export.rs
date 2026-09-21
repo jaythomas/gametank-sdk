@@ -20,7 +20,7 @@ fn note_to_freq_inc(hz: f64, sample_rate_hz: f64) -> u16 {
     ((hz / sample_rate_hz) * 65536.0).round().min(65535.0) as u16
 }
 
-// Resolve the phase increment of the note n number of `steps` above the base `note_name`
+// Resolve the phase increment of the note u8 `steps` above `note_name`
 // Returns `None` if note_name isn't found in the tuning table
 fn arp_offset_freq_inc(
     file: &TrackerFile,
@@ -30,6 +30,20 @@ fn arp_offset_freq_inc(
 ) -> Option<u16> {
     let idx = file.tuning.notes.get_index_of(note_name)?;
     let target_idx = (idx + steps as usize).min(file.tuning.notes.len().saturating_sub(1));
+    let (_, &hz) = file.tuning.notes.get_index(target_idx)?;
+    Some(note_to_freq_inc(hz, sample_rate_hz))
+}
+
+// Resolve the phase increment of the note u8 `steps` below `note_name`
+// Returns `None` if note_name isn't found in the tuning table
+fn pitch_down_offset_freq_inc(
+    file: &TrackerFile,
+    note_name: &str,
+    steps: u8,
+    sample_rate_hz: f64,
+) -> Option<u16> {
+    let idx = file.tuning.notes.get_index_of(note_name)?;
+    let target_idx = idx.saturating_sub(steps as usize);
     let (_, &hz) = file.tuning.notes.get_index(target_idx)?;
     Some(note_to_freq_inc(hz, sample_rate_hz))
 }
@@ -138,14 +152,23 @@ fn bake_pattern(
                 VOL_NO_CHANGE
             };
 
-            let (mut arp_x_freq, mut arp_y_freq) = (0u16, 0u16);
+            let (mut fx_freq_x, mut fx_freq_y) = (0u16, 0u16);
             if fx_id == FX_ID_ARPEGGIO
                 && let Some(name) = &cur_note_name
             {
-                arp_x_freq = arp_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(0);
+                fx_freq_x = arp_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(0);
                 if fx_y != ARP_NO_THIRD_NOTE {
-                    arp_y_freq = arp_offset_freq_inc(file, name, fx_y, sample_rate_hz).unwrap_or(0);
+                    fx_freq_y = arp_offset_freq_inc(file, name, fx_y, sample_rate_hz).unwrap_or(0);
                 }
+            } else if fx_id == FX_ID_PITCH_UP
+                && let Some(name) = &cur_note_name
+            {
+                fx_freq_x = arp_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(cur_freq);
+            } else if fx_id == FX_ID_PITCH_DOWN
+                && let Some(name) = &cur_note_name
+            {
+                fx_freq_x =
+                    pitch_down_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(cur_freq);
             }
 
             let base = 1 + ch * channel_stride;
@@ -155,10 +178,10 @@ fn bake_pattern(
             out[base + beats * 3 + beat] = fx_id;
             out[base + beats * 4 + beat] = fx_x;
             out[base + beats * 5 + beat] = fx_y;
-            out[base + beats * 6 + beat] = (arp_x_freq & 0xFF) as u8;
-            out[base + beats * 7 + beat] = (arp_x_freq >> 8) as u8;
-            out[base + beats * 8 + beat] = (arp_y_freq & 0xFF) as u8;
-            out[base + beats * 9 + beat] = (arp_y_freq >> 8) as u8;
+            out[base + beats * 6 + beat] = (fx_freq_x & 0xFF) as u8;
+            out[base + beats * 7 + beat] = (fx_freq_x >> 8) as u8;
+            out[base + beats * 8 + beat] = (fx_freq_y & 0xFF) as u8;
+            out[base + beats * 9 + beat] = (fx_freq_y >> 8) as u8;
         }
     }
 

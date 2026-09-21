@@ -73,6 +73,9 @@ struct PlayerInner {
     arp_y_freq: [u16; AUDIO_CHANNELS],
     arp_step_count: [u8; AUDIO_CHANNELS],
     arp_step: [u8; AUDIO_CHANNELS],
+    pitch_active: [bool; AUDIO_CHANNELS],
+    pitch_target: [u16; AUDIO_CHANNELS],
+    pitch_cur: [u16; AUDIO_CHANNELS],
     cur_note_name: [Option<String>; AUDIO_CHANNELS],
 }
 
@@ -144,6 +147,9 @@ impl PlayerInner {
             arp_y_freq: [0; AUDIO_CHANNELS],
             arp_step_count: [3; AUDIO_CHANNELS],
             arp_step: [0; AUDIO_CHANNELS],
+            pitch_active: [false; AUDIO_CHANNELS],
+            pitch_target: [0; AUDIO_CHANNELS],
+            pitch_cur: [0; AUDIO_CHANNELS],
             cur_note_name: std::array::from_fn(|_| None),
         }
     }
@@ -299,6 +305,7 @@ impl PlayerInner {
             self.current_instrument[ch] = instrument;
             self.set_voice_waveptr(ch, instrument);
             self.arp_active[ch] = false;
+            self.pitch_active[ch] = false;
         }
 
         for r in 0..row {
@@ -379,10 +386,6 @@ impl PlayerInner {
         }
     }
 
-    fn apply_pitch_up(&mut self, _ch: usize, _steps: u8) {}
-
-    fn apply_pitch_down(&mut self, _ch: usize, _steps: u8) {}
-
     fn apply_fade_in(&mut self, _ch: usize, _speed: u8) {}
 
     fn apply_fade_out(&mut self, _ch: usize, _speed: u8) {}
@@ -437,12 +440,6 @@ impl PlayerInner {
                 self.current_instrument[ch] = idx;
                 self.set_voice_waveptr(ch, idx);
             }
-            if let Some(x) = maybe_pitch_up {
-                self.apply_pitch_up(ch, x);
-            }
-            if let Some(x) = maybe_pitch_down {
-                self.apply_pitch_down(ch, x);
-            }
             if let Some(x) = maybe_fade_in {
                 self.apply_fade_in(ch, x);
             }
@@ -491,12 +488,43 @@ impl PlayerInner {
                         None => 2,
                     };
                     self.arp_active[ch] = true;
+                    self.pitch_active[ch] = false;
                 } else {
                     self.arp_active[ch] = false;
+                    self.pitch_active[ch] = false;
+                    self.set_voice_frequency(ch, self.base_freq[ch]);
+                }
+            } else if let Some(x) = maybe_pitch_up {
+                self.arp_active[ch] = false;
+                let note_name = maybe_note.clone().or_else(|| self.cur_note_name[ch].clone());
+                if let Some(note_name) = &note_name {
+                    self.pitch_target[ch] = self
+                        .arp_offset_freq(note_name, x)
+                        .unwrap_or(self.base_freq[ch]);
+                    self.pitch_cur[ch] = self.base_freq[ch];
+                    self.pitch_active[ch] = true;
+                    self.set_voice_frequency(ch, self.pitch_cur[ch]);
+                } else {
+                    self.pitch_active[ch] = false;
+                    self.set_voice_frequency(ch, self.base_freq[ch]);
+                }
+            } else if let Some(x) = maybe_pitch_down {
+                self.arp_active[ch] = false;
+                let note_name = maybe_note.clone().or_else(|| self.cur_note_name[ch].clone());
+                if let Some(note_name) = &note_name {
+                    self.pitch_target[ch] = self
+                        .pitch_down_offset_freq(note_name, x)
+                        .unwrap_or(self.base_freq[ch]);
+                    self.pitch_cur[ch] = self.base_freq[ch];
+                    self.pitch_active[ch] = true;
+                    self.set_voice_frequency(ch, self.pitch_cur[ch]);
+                } else {
+                    self.pitch_active[ch] = false;
                     self.set_voice_frequency(ch, self.base_freq[ch]);
                 }
             } else {
                 self.arp_active[ch] = false;
+                self.pitch_active[ch] = false;
                 self.set_voice_frequency(ch, self.base_freq[ch]);
             }
         }
@@ -510,22 +538,55 @@ impl PlayerInner {
         Some(freq_u32.min(0xFFFF) as u16)
     }
 
+    fn pitch_down_offset_freq(&self, note_name: &str, steps: u8) -> Option<u16> {
+        let idx = self.tuning_notes.get_index_of(note_name)?;
+        let target_idx = idx.saturating_sub(steps as usize);
+        let (_, &hz) = self.tuning_notes.get_index(target_idx)?;
+        let freq_u32 = ((hz / self.acp_sample_rate) * 65536.0).round() as u32;
+        Some(freq_u32.min(0xFFFF) as u16)
+    }
+
     fn advance_tick(&mut self) {
         for ch in 0..AUDIO_CHANNELS {
-            if !self.arp_active[ch] {
-                continue;
+            if self.arp_active[ch] {
+                let freq = match self.arp_step[ch] {
+                    0 => self.base_freq[ch],
+                    1 => self.arp_x_freq[ch],
+                    _ => self.arp_y_freq[ch],
+                };
+                self.set_voice_frequency(ch, freq);
+                self.arp_step[ch] = if self.arp_step[ch] + 1 >= self.arp_step_count[ch] {
+                    0
+                } else {
+                    self.arp_step[ch] + 1
+                };
+            } else if self.pitch_active[ch] {
+                let speed = (self.fx_speed as u16) * 4;
+                let cur = self.pitch_cur[ch];
+                let target = self.pitch_target[ch];
+                let next = if cur < target {
+                    let stepped = cur.saturating_add(speed);
+                    if stepped >= target {
+                        self.pitch_active[ch] = false;
+                        target
+                    } else {
+                        stepped
+                    }
+                } else if cur > target {
+                    let stepped = cur.saturating_sub(speed);
+                    if stepped <= target {
+                        self.pitch_active[ch] = false;
+                        target
+                    } else {
+                        stepped
+                    }
+                } else {
+                    self.pitch_active[ch] = false;
+                    target
+                };
+                self.pitch_cur[ch] = next;
+                self.set_voice_frequency(ch, next);
             }
-            let freq = match self.arp_step[ch] {
-                0 => self.base_freq[ch],
-                1 => self.arp_x_freq[ch],
-                _ => self.arp_y_freq[ch],
-            };
-            self.set_voice_frequency(ch, freq);
-            self.arp_step[ch] = if self.arp_step[ch] + 1 >= self.arp_step_count[ch] {
-                0
-            } else {
-                self.arp_step[ch] + 1
-            };
         }
     }
 

@@ -95,19 +95,27 @@ See `gametank/src/audio/mod.rs` and `gametank/src/audio/fm_4ch/mod.rs` for more 
 ```rust
 use gametank::audio::{FIRMWARE, TrackSequencer};
 
-static MY_MELODY: &[u8] = include_bytes!("../assets/my_melody.bin");
+const MY_MELODY_BANK: u8 = 123;
+
+#[unsafe(link_section = ".rodata.bank123")]
+static MY_MELODY: [u8; 12211] = *include_bytes!("../assets/my_melody.bin");
 
 fn main(console: &mut Console) {
     console.audio.load_firmware(FIRMWARE);
 
-    let mut sequencer = TrackSequencer::new(MY_MELODY.as_ptr());
-    // Loads instruments into RAM then (re-)activate the next needed ROM bank
-    sequencer.init_voices(console, 127);
+    let mut sequencer = TrackSequencer::new(
+      console,
+      MY_MELODY.as_ptr()
+      MY_MELODY_BANK,
+      126
+    );
+    // Load instruments into RAM then (re-)activate the bank for blitter
+    sequencer.init_voices(console, 126);
 
     loop {
         unsafe { wait_vblank(); }
         console.flip_framebuffers();
-        sequencer.tick();  // called every frame
+        sequencer.tick(console, 126);  // called every frame
     }
 }
 ```

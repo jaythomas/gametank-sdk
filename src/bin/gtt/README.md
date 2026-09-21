@@ -95,11 +95,11 @@ See the [Tuning editor](#tuning-editor) for how to update these mappings.
 | 0  | (no effect) |                                                          |                                                |
 | 1  | Instrument  | x (0-F) = instrument index                               | Switch which instrument this channel is using. |
 | 2  | Arpeggio    | x (0-F) = how many steps up to the second note,<br>y (0-F) = optional, steps up for a third note. | The arpeggiation steps to its next note once per tick, and FxSpeed sets how many ticks occur per beat. So an FxSpeed of `05` yields 3 ticks/notes a beat. |
-| 3  | PitchUp     | x (00-FF) = how many steps up to slide to | Portamento that increments at a rate of FxSpeed.              |
-| 4  | PitchDown   | x (00-FF) = how many steps down to slide to | Portamento that increments at a rate of FxSpeed.            |
+| 3  | PitchUp     | x (00-FF) = how many steps up to slide to                | Portamento that increments at a rate of FxSpeed. |
+| 4  | PitchDown   | x (00-FF) = how many steps down to slide to              | Portamento that decrements at a rate of FxSpeed. |
 | 5  | FadeIn      | x (00-3B) = how many ticks to hold each volume increment | Play note with a volume of 0 and raise volume up to the volume level set for that beat. |
 | 6  | FadeOut     | x (00-3B) = how many ticks to hold each volume increment | Play note at the volume level set for that beat and lower volume down to as low as the FadeOut speed allows |
-| 7  | Tremble     | x (00-3B) = how many ticks to hold a note off then on    | Hard tremolo. Rapidly play and mute a note.    |
+| 7  | Tremble     | x (00-3B) = how many ticks to hold a note off then on    | Hard tremolo. Rapidly play and mute a note. |
 
 ## Control deck
 
@@ -226,9 +226,9 @@ The exported `<name>-export/<name>.bin` is made of three parts:
 >  freq_lo[beats], freq_hi[beats]   16-bit phase increment; 0x0000 holds the previous note
 >  vol[beats]                       0-63, or 0xFF to hold the previous volume
 >  fx_id[beats]                     equal to the channel effect ID (see channel FX definitions above); 0 = no effect
->  fx_x[beats], fx_y[beats]         raw effect parameters (scale-degree offsets for Arpeggio)
->  arp_freq_x_lo/hi[beats]          baked +x scale-degree frequency (Arpeggio only)
->  arp_freq_y_lo/hi[beats]          baked +y scale-degree frequency (Arpeggio only)
+>  fx_x[beats], fx_y[beats]         raw effect parameters (scale-degree offsets for Arpeggio/PitchUp/PitchDown)
+>  fx_freq_x_lo/hi[beats]           baked target frequency for fx_x (Arpeggio's +x note, or PitchUp/PitchDown's slide target)
+>  fx_freq_y_lo/hi[beats]           baked +y scale-degree frequency (Arpeggio only)
 >  seq_cmd_type[beats]              equal to the sequence command ID (see SEQ definitions above); 0 = no command
 >  seq_cmd_value[beats]             raw command value (unused for Stop; pattern index for CountJump)
 >  seq_cmd_value2[beats]            second raw command value (only used for CountJump: target beat)

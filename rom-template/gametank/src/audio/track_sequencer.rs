@@ -41,10 +41,10 @@ static INSTRUMENT_TABLES: [[u8; 256]; 11] = [
 // - fx_id
 // - fx_x
 // - fx_y
-// - arp_freq_x_lo
-// - arp_freq_x_hi
-// - arp_freq_y_lo
-// - arp_freq_y_hi
+// - fx_freq_x_lo
+// - fx_freq_x_hi
+// - fx_freq_y_lo
+// - fx_freq_y_hi
 const CHANNEL_ARRAYS: usize = 10;
 
 const FX_ID_INSTRUMENT: u8 = 1;
@@ -56,8 +56,6 @@ const FX_ID_FADE_OUT: u8 = 6;
 const FX_ID_TREMBLE: u8 = 7;
 const ARP_NO_THIRD_NOTE: u8 = 0xFF;
 
-fn apply_pitch_up(_ch: usize, _steps: u8) {}
-fn apply_pitch_down(_ch: usize, _steps: u8) {}
 fn apply_fade_in(_ch: usize, _speed: u8) {}
 fn apply_fade_out(_ch: usize, _speed: u8) {}
 fn apply_tremble(_ch: usize, _speed: u8) {}
@@ -67,6 +65,9 @@ fn apply_tremble(_ch: usize, _speed: u8) {}
 /// `init_voices` once after loading the firmware and `tick` once per frame.
 pub struct TrackSequencer {
     track: *const u8,
+    // ROM bank the track descriptor/patterns live in. Every tick before
+    // reading `track`, this bank gets selected, then switches to back.
+    track_bank: u8,
     beat: u8,
     frame_acc: u16,
     tick_acc: u16,
@@ -76,7 +77,7 @@ pub struct TrackSequencer {
     pattern_count: u8,
     flow_count: u8,
     stopped: bool,
-    arp_active_any: bool,
+    fx_active_any: bool,
 }
 
 // Channel base note pitch, written by `advance_beat`. This is different than the active
@@ -90,6 +91,12 @@ static mut ARP_Y_FREQ: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
 static mut ARP_STEP_COUNT: [u8; VOICE_COUNT] = [3; VOICE_COUNT];
 // Each channel's current position within its own arpeggio cycle
 static mut ARP_STEP: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
+// Whether the current channel and beat has an active PitchUp/PitchDown glide
+static mut PITCH_ACTIVE: [bool; VOICE_COUNT] = [false; VOICE_COUNT];
+// The baked frequency the glide is sliding toward
+static mut PITCH_TARGET: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
+// The glide's current frequency, moved toward PITCH_TARGET by `speed` each tick
+static mut PITCH_CUR: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
 
 // See the gt-tracker README for the track descriptor layout
 const TRACK_BPM_OFFSET: usize = 0;
@@ -107,12 +114,15 @@ const SEQ_CMD_JUMP: u8 = 6;
 
 impl TrackSequencer {
     // Create a sequencer for the given track descriptor
-    pub fn new(track: *const u8) -> Self {
+    pub fn new(console: &mut Console, track: *const u8, track_bank: u8, restore_bank: u8) -> Self {
+        console.set_rom_bank(track_bank);
         let bpm = unsafe { read_u16(track, TRACK_BPM_OFFSET) };
         let speed = unsafe { read_u16(track, TRACK_SPEED_OFFSET) };
         let pattern_count = unsafe { *track.add(TRACK_PATTERN_COUNT_OFFSET) };
+        console.set_rom_bank(restore_bank);
         Self {
             track,
+            track_bank,
             beat: 0,
             frame_acc: 0,
             tick_acc: 0,
@@ -122,7 +132,7 @@ impl TrackSequencer {
             pattern_count,
             flow_count: 0,
             stopped: false,
-            arp_active_any: false,
+            fx_active_any: false,
         }
     }
 
@@ -143,15 +153,16 @@ impl TrackSequencer {
         unsafe { core::ptr::write_volatile(0x2006 as *mut u8, SAMPLE_RATE_REG) };
     }
 
-    // Advance the sequencer by one frame every game loop
-    pub fn tick(&mut self) {
+    // Advance the sequencer by one frame every game loop. `restore_bank` us
+    // gets back to where we started after the sequencer uses its `track_bank`
+    pub fn tick(&mut self, console: &mut Console, restore_bank: u8) {
         if self.stopped {
             return;
         }
 
         self.frame_acc += self.bpm;
 
-        if self.arp_active_any {
+        if self.fx_active_any {
             let mut remaining = self.speed;
             while remaining > 0 {
                 // read_volatile prevents LLVM from trying to optimize this into an unsupported `__mulhi3`
@@ -168,29 +179,56 @@ impl TrackSequencer {
 
         if self.frame_acc >= 1800 {
             self.frame_acc -= 1800;
+            console.set_rom_bank(self.track_bank);
             self.advance_beat();
+            console.set_rom_bank(restore_bank);
         }
     }
 
     // Run sub-tick effect
     fn advance_tick(&mut self) {
         let v = voices();
+        let speed = self.speed << 2;
         unsafe {
             for ch in 0..VOICE_COUNT {
-                if !ARP_ACTIVE[ch] {
-                    continue;
+                if ARP_ACTIVE[ch] {
+                    let freq = match ARP_STEP[ch] {
+                        0 => BASE_FREQ[ch],
+                        1 => ARP_X_FREQ[ch],
+                        _ => ARP_Y_FREQ[ch],
+                    };
+                    v[ch].set_frequency(freq);
+                    ARP_STEP[ch] = if ARP_STEP[ch] + 1 >= ARP_STEP_COUNT[ch] {
+                        0
+                    } else {
+                        ARP_STEP[ch] + 1
+                    };
+                } else if PITCH_ACTIVE[ch] {
+                    let cur = PITCH_CUR[ch];
+                    let target = PITCH_TARGET[ch];
+                    let next = if cur < target {
+                        let stepped = cur.saturating_add(speed);
+                        if stepped >= target {
+                            PITCH_ACTIVE[ch] = false;
+                            target
+                        } else {
+                            stepped
+                        }
+                    } else if cur > target {
+                        let stepped = cur.saturating_sub(speed);
+                        if stepped <= target {
+                            PITCH_ACTIVE[ch] = false;
+                            target
+                        } else {
+                            stepped
+                        }
+                    } else {
+                        PITCH_ACTIVE[ch] = false;
+                        target
+                    };
+                    PITCH_CUR[ch] = next;
+                    v[ch].set_frequency(next);
                 }
-                let freq = match ARP_STEP[ch] {
-                    0 => BASE_FREQ[ch],
-                    1 => ARP_X_FREQ[ch],
-                    _ => ARP_Y_FREQ[ch],
-                };
-                v[ch].set_frequency(freq);
-                ARP_STEP[ch] = if ARP_STEP[ch] + 1 >= ARP_STEP_COUNT[ch] {
-                    0
-                } else {
-                    ARP_STEP[ch] + 1
-                };
             }
         }
     }
@@ -276,10 +314,10 @@ impl TrackSequencer {
         let off_fx_id = off_vol + pattern_beats;
         let off_fx_x = off_fx_id + pattern_beats;
         let off_fx_y = off_fx_x + pattern_beats;
-        let off_arp_x_lo = off_fx_y + pattern_beats;
-        let off_arp_x_hi = off_arp_x_lo + pattern_beats;
-        let off_arp_y_lo = off_arp_x_hi + pattern_beats;
-        let off_arp_y_hi = off_arp_y_lo + pattern_beats;
+        let off_fx_freq_x_lo = off_fx_y + pattern_beats;
+        let off_fx_freq_x_hi = off_fx_freq_x_lo + pattern_beats;
+        let off_fx_freq_y_lo = off_fx_freq_x_hi + pattern_beats;
+        let off_fx_freq_y_hi = off_fx_freq_y_lo + pattern_beats;
 
         let v = voices();
         let mut base = 0usize;
@@ -302,23 +340,33 @@ impl TrackSequencer {
             }
 
             if fx_id == FX_ID_ARPEGGIO {
-                let arp_x_lo = unsafe { *data.add(base + off_arp_x_lo + beat) } as u16;
-                let arp_x_hi = unsafe { *data.add(base + off_arp_x_hi + beat) } as u16;
-                let arp_y_lo = unsafe { *data.add(base + off_arp_y_lo + beat) } as u16;
-                let arp_y_hi = unsafe { *data.add(base + off_arp_y_hi + beat) } as u16;
+                let arp_x_lo = unsafe { *data.add(base + off_fx_freq_x_lo + beat) } as u16;
+                let arp_x_hi = unsafe { *data.add(base + off_fx_freq_x_hi + beat) } as u16;
+                let arp_y_lo = unsafe { *data.add(base + off_fx_freq_y_lo + beat) } as u16;
+                let arp_y_hi = unsafe { *data.add(base + off_fx_freq_y_hi + beat) } as u16;
                 unsafe {
                     ARP_ACTIVE[ch] = true;
                     ARP_X_FREQ[ch] = arp_x_lo | (arp_x_hi << 8);
                     ARP_Y_FREQ[ch] = arp_y_lo | (arp_y_hi << 8);
                     ARP_STEP_COUNT[ch] = if fx_y == ARP_NO_THIRD_NOTE { 2 } else { 3 };
                     ARP_STEP[ch] = 0;
+                    PITCH_ACTIVE[ch] = false;
+                }
+                any_active = true;
+            } else if fx_id == FX_ID_PITCH_UP || fx_id == FX_ID_PITCH_DOWN {
+                let target_lo = unsafe { *data.add(base + off_fx_freq_x_lo + beat) } as u16;
+                let target_hi = unsafe { *data.add(base + off_fx_freq_x_hi + beat) } as u16;
+                unsafe {
+                    ARP_ACTIVE[ch] = false;
+                    PITCH_ACTIVE[ch] = true;
+                    PITCH_TARGET[ch] = target_lo | (target_hi << 8);
+                    PITCH_CUR[ch] = BASE_FREQ[ch];
+                    v[ch].set_frequency(PITCH_CUR[ch]);
                 }
                 any_active = true;
             } else {
                 match fx_id {
                     FX_ID_INSTRUMENT => v[ch].set_wavetable(WAVETABLE[fx_x as usize]),
-                    FX_ID_PITCH_UP => apply_pitch_up(ch, fx_x),
-                    FX_ID_PITCH_DOWN => apply_pitch_down(ch, fx_x),
                     FX_ID_FADE_IN => apply_fade_in(ch, fx_x),
                     FX_ID_FADE_OUT => apply_fade_out(ch, fx_x),
                     FX_ID_TREMBLE => apply_tremble(ch, fx_x),
@@ -326,12 +374,13 @@ impl TrackSequencer {
                 }
                 unsafe {
                     ARP_ACTIVE[ch] = false;
+                    PITCH_ACTIVE[ch] = false;
                     v[ch].set_frequency(BASE_FREQ[ch]);
                 }
             }
             base += channel_stride;
         }
-        self.arp_active_any = any_active;
+        self.fx_active_any = any_active;
     }
 }
 

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use rat_widget::button::{Button, ButtonState};
 use ratatui::{
     Frame,
@@ -5,17 +7,19 @@ use ratatui::{
     crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
     },
-    layout::{Position, Rect},
+    layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, Clear},
+    widgets::{Block, Clear, Paragraph},
 };
 
+use super::file_picker::{FilePicker, PickerOutcome};
 use crate::scheme::SCHEME;
 use crate::{action::ComponentAction, component::Component, file::TrackerFile};
 
 const CANCEL_BTN_W: u16 = 8;
 const SAVE_BTN_W: u16 = 6;
+const IMPORT_BTN_W: u16 = 8;
 const BTN_GAP: u16 = 2;
 const Y_AXIS_W: u16 = 3;
 const BAR_W: u16 = 1;
@@ -35,10 +39,13 @@ pub struct InstrumentEditor {
     instrument_name: String,
     cancel_button: ButtonState,
     save_button: ButtonState,
+    import_button: ButtonState,
     values: [u8; NUM_BARS],
     selected: usize,
     painting: bool,
     bar_layout: BarLayout,
+    file_picker: FilePicker,
+    import_error: Option<String>,
 }
 
 impl InstrumentEditor {
@@ -49,10 +56,13 @@ impl InstrumentEditor {
             instrument_name: String::new(),
             cancel_button: ButtonState::new(),
             save_button: ButtonState::new(),
+            import_button: ButtonState::new(),
             values: [0u8; NUM_BARS],
             selected: 0,
             painting: false,
             bar_layout: BarLayout::default(),
+            file_picker: FilePicker::new(),
+            import_error: None,
         }
     }
 
@@ -62,16 +72,63 @@ impl InstrumentEditor {
         self.instrument_idx = idx;
         self.instrument_name = name.to_string();
         self.values = *waveform;
+        self.file_picker.close();
+        self.import_error = None;
     }
 
     pub fn get_values(&self) -> [u8; NUM_BARS] {
         self.values
+    }
+
+    fn try_import_raw(&mut self, path: &Path) {
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        match std::fs::read(path) {
+            Err(_) => {
+                self.import_error = Some(format!("Failed to read {}", filename));
+            }
+            Ok(bytes) => {
+                let len = bytes.len().min(NUM_BARS);
+                self.values = [0u8; NUM_BARS];
+                self.values[..len].copy_from_slice(&bytes[..len]);
+                self.selected = 0;
+                self.painting = false;
+                self.import_error = if bytes.len() != NUM_BARS {
+                    Some(format!(
+                        "{} is {} bytes (expected {}); imported with padding/truncation",
+                        filename,
+                        bytes.len(),
+                        NUM_BARS
+                    ))
+                } else {
+                    None
+                };
+            }
+        }
     }
 }
 
 impl Component for InstrumentEditor {
     fn update(&mut self, events: Vec<Event>, _file: &mut TrackerFile) -> Vec<ComponentAction> {
         let mut actions = Vec::new();
+
+        if self.file_picker.is_active() {
+            for event in &events {
+                match self.file_picker.handle_event(event) {
+                    PickerOutcome::Selected(path) => {
+                        self.try_import_raw(&path);
+                        break;
+                    }
+                    PickerOutcome::Cancelled => break,
+                    PickerOutcome::None => {}
+                }
+            }
+            return actions;
+        }
+
         for event in &events {
             match event {
                 Event::Key(KeyEvent {
@@ -123,7 +180,15 @@ impl Component for InstrumentEditor {
                         x: *column,
                         y: *row,
                     };
-                    if self.cancel_button.area.contains(pos) {
+                    if self.import_button.area.contains(pos) {
+                        self.import_error = None;
+                        self.file_picker.open(
+                            " Select .raw file ",
+                            SCHEME.orange[2],
+                            SCHEME.true_dark_color(SCHEME.black[2]),
+                            "raw",
+                        );
+                    } else if self.cancel_button.area.contains(pos) {
                         self.visible = false;
                     } else if self.save_button.area.contains(pos) {
                         let waveform = self.get_values();
@@ -202,6 +267,12 @@ impl Component for InstrumentEditor {
             width: CANCEL_BTN_W,
             height: 1,
         };
+        let import_area = Rect {
+            x: cancel_area.x.saturating_sub(BTN_GAP + IMPORT_BTN_W),
+            y: modal_area.y,
+            width: IMPORT_BTN_W,
+            height: 1,
+        };
 
         let default_style = Style::new().bg(bg).fg(SCHEME.white[2]);
         let focus_style = Style::new()
@@ -211,6 +282,14 @@ impl Component for InstrumentEditor {
 
         self.cancel_button.focus.set(false);
         self.save_button.focus.set(false);
+        self.import_button.focus.set(false);
+        frame.render_stateful_widget(
+            Button::new(Line::from("[Import]").style(default_style))
+                .style(default_style)
+                .focus_style(focus_style),
+            import_area,
+            &mut self.import_button,
+        );
         frame.render_stateful_widget(
             Button::new(Line::from("[Cancel]").style(default_style))
                 .style(default_style)
@@ -226,9 +305,32 @@ impl Component for InstrumentEditor {
             &mut self.save_button,
         );
 
-        if inner.height > 0 && inner.width > Y_AXIS_W {
+        if self.file_picker.is_active() {
+            self.file_picker.render(frame, inner);
+            return;
+        }
+
+        let has_error = self.import_error.is_some();
+        let [error_row, bars_area] = Layout::vertical([
+            Constraint::Length(if has_error { 1 } else { 0 }),
+            Constraint::Fill(1),
+        ])
+        .areas(inner);
+
+        if has_error {
+            let error_style = Style::new()
+                .bg(bg)
+                .fg(SCHEME.red[2])
+                .add_modifier(Modifier::BOLD);
+            frame.render_widget(
+                Paragraph::new(self.import_error.as_deref().unwrap_or("")).style(error_style),
+                error_row,
+            );
+        }
+
+        if bars_area.height > 0 && bars_area.width > Y_AXIS_W {
             let buf = frame.buffer_mut();
-            self.render_bars(buf, inner, bg);
+            self.render_bars(buf, bars_area, bg);
         }
     }
 }

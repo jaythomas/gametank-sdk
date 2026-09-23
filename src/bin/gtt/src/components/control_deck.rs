@@ -1277,6 +1277,7 @@ impl Component for ControlDeck {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Fill(1),
         ])
         .split(settings_col);
@@ -1367,9 +1368,9 @@ impl Component for ControlDeck {
         let play_focused = sel_row == Row::ActionPlay;
         let play_label = if self.playing { "[Pause]" } else { "[Play]" };
         let play_area = Rect {
-            x: setting_rows[4].x,
-            y: setting_rows[4].y,
-            width: PLAY_BTN_W.min(setting_rows[4].width),
+            x: setting_rows[5].x,
+            y: setting_rows[5].y,
+            width: PLAY_BTN_W.min(setting_rows[5].width),
             height: 1,
         };
         self.action_play_btn.focus.set(play_focused);

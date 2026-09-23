@@ -2,6 +2,7 @@ mod command_palette;
 mod control_deck;
 mod export_confirm_modal;
 mod file_browser;
+mod file_picker;
 mod instrument_editor;
 mod pattern_delete_confirm_modal;
 mod pattern_editor;

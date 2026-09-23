@@ -2,7 +2,7 @@
 
 A music editor/tracker for the [GameTank](https://gametank.zone/).
 
-![gt-tracker screenshot](./screenshot.png)
+![gt-tracker screenshot](./screenshot1.png)
 
 <!-- Run `npx doctoc README.md to re-generate the TOC` -->
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
@@ -132,24 +132,24 @@ This provides quick keyboard-driven actions. All the commands available on the c
 When you start typing `:` your command input will start appearing at the very bottom of the screen.
 Press Enter to execute or Esc to cancel the command input.
 
-| command         | description            |
-| -------         | -----------            |
-| `:exp`/`export` | export track           |
-| `:instrument`   | open instrument editor |
-| `:w`/`:write`   | save changes to file   |
-| `:q`/`:quit`    | quit the application   |
+| command          | description            |
+| -------          | -----------            |
+| `:exp`/`:export` | export track           |
+| `:instrument`    | open instrument editor |
+| `:w`/`:write`    | save changes to file   |
+| `:q`/`:quit`     | quit the application   |
 
 TODO: lots more commands
 
 
 ## Instrument editor
 
+![gt-tracker instrument editor screenshot](./screenshot2.png)
+
 An instrument is a 256-byte waveform, 8 bytes of 8-byte data points.
 This is represented by 256 bars (00-FF) with adjustable height.
 You can adjust the data points by dragging the mouse cursor like a brush stroke.
 For fine tuning the values, you also have the arrow keys.
-Simply click `[cancel]` or `[save]` when done.
-
 Each byte is an unsigned 8-bit PCM sample:
 
 | value         | description                  |
@@ -157,6 +157,10 @@ Each byte is an unsigned 8-bit PCM sample:
 | `0x80`        | Zero / silence (DC midpoint) |
 | `0x81`-`0xFF` | Positive half-cycle          |
 | `0x00`-`0x7F` | Negative half-cycle          |
+
+For exporting and importing, you can use the `[Export]` button on the Control Deck to export out the raw waveform from a given track, then within the instrument editor use the `[Import]` button to slot in an instrument waveform you already made.
+
+Simply click `[Cancel]` or `[Save]` when done.
 
 ## Tuning editor
 
@@ -179,7 +183,7 @@ The key bindings lives in your application config:
 | ----- | ----- | ------- |
 | `$XDG_CONFIG_HOME/gtt/default-config.toml` or `$HOME/.config/gtt/default-config.toml` | `$HOME/Library/Application Support/gtt/default-config.toml` | `{FOLDERID_RoamingAppData}/gtt/config/default-config.toml` |
 
-Just click `[cancel]` or `[save]` when done.
+Just click `[Cancel]` or `[Save]` when done.
 
 
 ## Using your tracks

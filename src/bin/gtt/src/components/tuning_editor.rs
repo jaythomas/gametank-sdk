@@ -14,10 +14,10 @@ use ratatui::{
     text::Line,
     widgets::{
         Block, Cell, Clear, Paragraph, Row as TableRow, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Table, WidgetRef,
+        ScrollbarState, Table,
     },
 };
-use ratatui_explorer::{FileExplorer, FileExplorerBuilder, Input as ExplorerInput};
+use super::file_picker::{FilePicker, PickerOutcome};
 
 use crate::{
     action::ComponentAction,
@@ -92,9 +92,7 @@ pub struct TuningEditor {
     editing: bool,
     entries: Vec<SclEntry>,
     entry_scroll: usize,
-    explorer_area: Rect,
-    explorer_scroll_offset: usize,
-    file_explorer: Option<FileExplorer>,
+    file_picker: FilePicker,
     freq_panel_area: Rect,
     freq_rows: Vec<(String, f64, u16)>,
     freq_scroll_offset: usize,
@@ -129,9 +127,7 @@ impl TuningEditor {
             editing: false,
             entries: Vec::new(),
             entry_scroll: 0,
-            explorer_area: Rect::default(),
-            explorer_scroll_offset: 0,
-            file_explorer: None,
+            file_picker: FilePicker::new(),
             freq_panel_area: Rect::default(),
             freq_rows: Vec::new(),
             freq_scroll_offset: 0,
@@ -156,8 +152,7 @@ impl TuningEditor {
         self.capturing_row = None;
         self.editing = false;
         self.entry_scroll = 0;
-        self.explorer_scroll_offset = 0;
-        self.file_explorer = None;
+        self.file_picker.close();
         self.name_duplicate = false;
         self.scl_error = None;
         self.selected = 0;
@@ -435,42 +430,12 @@ impl TuningEditor {
     }
 
     fn open_file_explorer(&mut self) {
-        let bg = SCHEME.true_dark_color(SCHEME.black[2]);
-        let theme = ratatui_explorer::Theme::default().with_block(
-            Block::bordered()
-                .title(" Select .scl file ")
-                .border_style(Style::new().fg(SCHEME.orange[2]))
-                .style(Style::new().bg(bg)),
+        self.file_picker.open(
+            " Select .scl file ",
+            SCHEME.orange[2],
+            SCHEME.true_dark_color(SCHEME.black[2]),
+            "scl",
         );
-        let result = FileExplorerBuilder::default()
-            .filter_map(|file| {
-                if file.is_dir || file.path.extension().is_some_and(|ext| ext == "scl") {
-                    Some(file)
-                } else {
-                    None
-                }
-            })
-            .theme(theme)
-            .build();
-        if let Ok(explorer) = result {
-            self.file_explorer = Some(explorer);
-            self.explorer_scroll_offset = 0;
-        }
-    }
-
-    fn explorer_sync_offset(&mut self) {
-        if let Some(ref explorer) = self.file_explorer {
-            let selected = explorer.selected_idx();
-            let visible_h = self.explorer_area.height.saturating_sub(2) as usize;
-            if visible_h == 0 {
-                return;
-            }
-            if selected < self.explorer_scroll_offset {
-                self.explorer_scroll_offset = selected;
-            } else if selected >= self.explorer_scroll_offset + visible_h {
-                self.explorer_scroll_offset = selected + 1 - visible_h;
-            }
-        }
     }
 
     fn try_import_scl(&mut self, path: &Path) {
@@ -515,129 +480,16 @@ impl Component for TuningEditor {
     fn update(&mut self, events: Vec<Event>, _file: &mut TrackerFile) -> Vec<ComponentAction> {
         let mut actions = Vec::new();
 
-        if self.file_explorer.is_some() {
-            let mut close = false;
-            let mut import_path: Option<std::path::PathBuf> = None;
-
+        if self.file_picker.is_active() {
             for event in &events {
-                match event {
-                    Event::Key(KeyEvent {
-                        code: KeyCode::Esc,
-                        kind: KeyEventKind::Press,
-                        ..
-                    }) => {
-                        close = true;
+                match self.file_picker.handle_event(event) {
+                    PickerOutcome::Selected(path) => {
+                        self.try_import_scl(&path);
                         break;
                     }
-                    Event::Key(KeyEvent {
-                        code: KeyCode::Enter | KeyCode::Right,
-                        kind: KeyEventKind::Press,
-                        ..
-                    }) => {
-                        let explorer = self.file_explorer.as_ref().unwrap();
-                        if !explorer.current().is_dir {
-                            import_path = Some(explorer.current().path.clone());
-                            close = true;
-                            break;
-                        } else {
-                            let _ = self.file_explorer.as_mut().unwrap().handle(event);
-                            self.explorer_scroll_offset = 0;
-                            self.explorer_sync_offset();
-                        }
-                    }
-                    Event::Key(KeyEvent {
-                        code: KeyCode::Left | KeyCode::Backspace,
-                        kind: KeyEventKind::Press,
-                        ..
-                    }) => {
-                        let _ = self.file_explorer.as_mut().unwrap().handle(event);
-                        self.explorer_scroll_offset = 0;
-                        self.explorer_sync_offset();
-                    }
-                    Event::Key(_) => {
-                        let _ = self.file_explorer.as_mut().unwrap().handle(event);
-                        self.explorer_sync_offset();
-                    }
-                    Event::Mouse(MouseEvent {
-                        kind: MouseEventKind::ScrollUp,
-                        column,
-                        row,
-                        ..
-                    }) => {
-                        if self.explorer_area.contains(Position {
-                            x: *column,
-                            y: *row,
-                        }) {
-                            let _ = self
-                                .file_explorer
-                                .as_mut()
-                                .unwrap()
-                                .handle(ExplorerInput::Up);
-                            self.explorer_sync_offset();
-                        }
-                    }
-                    Event::Mouse(MouseEvent {
-                        kind: MouseEventKind::ScrollDown,
-                        column,
-                        row,
-                        ..
-                    }) => {
-                        if self.explorer_area.contains(Position {
-                            x: *column,
-                            y: *row,
-                        }) {
-                            let _ = self
-                                .file_explorer
-                                .as_mut()
-                                .unwrap()
-                                .handle(ExplorerInput::Down);
-                            self.explorer_sync_offset();
-                        }
-                    }
-                    Event::Mouse(MouseEvent {
-                        kind: MouseEventKind::Down(MouseButton::Left),
-                        column,
-                        row,
-                        ..
-                    }) => {
-                        let area = self.explorer_area;
-                        let content_top = area.y + 1;
-                        let content_bottom = area.y + area.height.saturating_sub(1);
-                        let content_left = area.x + 1;
-                        let content_right = area.x + area.width.saturating_sub(1);
-                        if *row >= content_top
-                            && *row < content_bottom
-                            && *column >= content_left
-                            && *column < content_right
-                        {
-                            let content_row = (*row - content_top) as usize;
-                            let explorer = self.file_explorer.as_mut().unwrap();
-                            let n = explorer.files().len();
-                            if n == 0 {
-                                continue;
-                            }
-                            let target = (self.explorer_scroll_offset + content_row).min(n - 1);
-                            explorer.set_selected_idx(target);
-                            if explorer.current().is_dir {
-                                let _ = explorer.handle(ExplorerInput::Right);
-                                self.explorer_scroll_offset = 0;
-                            } else {
-                                import_path = Some(explorer.current().path.clone());
-                                close = true;
-                                break;
-                            }
-                            self.explorer_sync_offset();
-                        }
-                    }
-                    _ => {}
+                    PickerOutcome::Cancelled => break,
+                    PickerOutcome::None => {}
                 }
-            }
-
-            if close {
-                self.file_explorer = None;
-            }
-            if let Some(path) = import_path {
-                self.try_import_scl(&path);
             }
             return vec![];
         }
@@ -1065,13 +917,11 @@ impl Component for TuningEditor {
             );
         }
 
-        if let Some(explorer) = &self.file_explorer {
-            frame.render_widget(Clear, content_area);
-            self.explorer_area = content_area;
-            let buf = frame.buffer_mut();
-            explorer.widget().render_ref(content_area, buf);
+        if self.file_picker.is_active() {
+            self.file_picker.render(frame, content_area);
             return;
         }
+
 
         if content_area.height == 0 {
             return;

@@ -222,7 +222,7 @@ impl TrackerFile {
         Self {
             schema_version: 0,
             instruments: std::array::from_fn(|i| InstrumentData {
-                name: format!("instrument_{}", i + 1),
+                name: format!("instrument_{}", i),
                 waveform: square.clone(),
             }),
             tuning: default_tuning(),

@@ -20,6 +20,7 @@ const INSTRUMENT_BANK: u8 = 125;
 
 #[unsafe(link_section = ".rodata.bank125")]
 static INSTRUMENT_TABLES: [[u8; 256]; 11] = [
+    instrument_table!(0),
     instrument_table!(1),
     instrument_table!(2),
     instrument_table!(3),
@@ -30,7 +31,6 @@ static INSTRUMENT_TABLES: [[u8; 256]; 11] = [
     instrument_table!(8),
     instrument_table!(9),
     instrument_table!(10),
-    instrument_table!(11),
 ];
 
 // Number of parallel per-beat arrays packed into each channel's slice of a
@@ -377,7 +377,8 @@ impl TrackSequencer {
             let had_freq_fx = prev_fx == ACTIVE_FX_ARP || prev_fx == ACTIVE_FX_PITCH;
             let had_vol_fx = prev_fx == ACTIVE_FX_FADE || prev_fx == ACTIVE_FX_TREMBLE;
 
-            if lo | hi != 0 {
+            let new_note = lo | hi != 0;
+            if new_note {
                 unsafe {
                     BASE_FREQ[ch] = lo | (hi << 8);
                 }
@@ -425,13 +426,16 @@ impl TrackSequencer {
                     v[ch].set_volume(FADE_CUR[ch]);
                     VOL_FX_HOLD[ch] = fx_x;
                     VOL_FX_COUNTER[ch] = fx_x;
+                    if new_note || had_freq_fx {
+                        v[ch].set_frequency(BASE_FREQ[ch]);
+                    }
                 }
                 any_active = true;
             } else if fx_id == FX_ID_INSTRUMENT {
                 v[ch].set_wavetable(WAVETABLE[fx_x as usize]);
                 unsafe {
                     ACTIVE_FX[ch] = ACTIVE_FX_NONE;
-                    if had_freq_fx {
+                    if new_note || had_freq_fx {
                         v[ch].set_frequency(BASE_FREQ[ch]);
                     }
                     if had_vol_fx {
@@ -444,12 +448,15 @@ impl TrackSequencer {
                     VOL_FX_HOLD[ch] = fx_x;
                     VOL_FX_COUNTER[ch] = fx_x;
                     TREMBLE_MUTED[ch] = false;
+                    if new_note || had_freq_fx {
+                        v[ch].set_frequency(BASE_FREQ[ch]);
+                    }
                 }
                 any_active = true;
             } else {
                 unsafe {
                     ACTIVE_FX[ch] = ACTIVE_FX_NONE;
-                    if had_freq_fx {
+                    if new_note || had_freq_fx {
                         v[ch].set_frequency(BASE_FREQ[ch]);
                     }
                     if had_vol_fx {

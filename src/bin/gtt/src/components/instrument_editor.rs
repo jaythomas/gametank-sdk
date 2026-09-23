@@ -244,8 +244,7 @@ impl Component for InstrumentEditor {
 
         let title_text = format!(
             " Editing {} (instrument {}) ",
-            self.instrument_name,
-            self.instrument_idx + 1
+            self.instrument_name, self.instrument_idx
         );
         let block = Block::bordered()
             .title(Line::from(title_text).style(title_style))

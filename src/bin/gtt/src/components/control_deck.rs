@@ -271,7 +271,7 @@ impl ControlDeck {
             trans_note_count: 0,
             trans_scale_size: 0,
             instruments: std::array::from_fn(|i| {
-                InstrumentEntry::new(&format!("instrument_{}", i + 1))
+                InstrumentEntry::new(&format!("instrument_{}", i))
             }),
             playing: false,
             action_tuning_btn: ButtonState::new(),

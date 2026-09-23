@@ -97,8 +97,8 @@ See the [Tuning editor](#tuning-editor) for how to update these mappings.
 | 2  | Arpeggio    | x (0-F) = how many steps up to the second note,<br>y (0-F) = optional, steps up for a third note. | The arpeggiation steps to its next note once per tick, and FxSpeed sets how many ticks occur per beat. So an FxSpeed of `05` yields 3 ticks/notes a beat. |
 | 3  | PitchUp     | x (00-FF) = how many steps up to slide to                | Portamento that increments at a rate of FxSpeed. |
 | 4  | PitchDown   | x (00-FF) = how many steps down to slide to              | Portamento that decrements at a rate of FxSpeed. |
-| 5  | FadeIn      | x (00-3B) = how many ticks to hold each volume increment | Play note with a volume of 0 and raise volume up to the volume level set for that beat. |
-| 6  | FadeOut     | x (00-3B) = how many ticks to hold each volume increment | Play note at the volume level set for that beat and lower volume down to as low as the FadeOut speed allows |
+| 5  | FadeIn      | x (00-3B) = how many ticks to hold each volume increment | Play note with a volume of 0 and raise volume up at a rate of `x` until reaching set volume or the beat ends. |
+| 6  | FadeOut     | x (00-3B) = how many ticks to hold each volume increment | Play note at the volume level set for the beat and lower volume down to 0 at a rate of `x`. |
 | 7  | Tremble     | x (00-3B) = how many ticks to hold a note off then on    | Hard tremolo. Rapidly play and mute a note. |
 
 ## Control deck

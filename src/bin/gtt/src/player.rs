@@ -76,6 +76,13 @@ struct PlayerInner {
     pitch_active: [bool; AUDIO_CHANNELS],
     pitch_target: [u16; AUDIO_CHANNELS],
     pitch_cur: [u16; AUDIO_CHANNELS],
+    fade_active: [bool; AUDIO_CHANNELS],
+    fade_target: [u8; AUDIO_CHANNELS],
+    fade_cur: [u8; AUDIO_CHANNELS],
+    vol_fx_hold: [u8; AUDIO_CHANNELS],
+    vol_fx_counter: [u8; AUDIO_CHANNELS],
+    tremble_active: [bool; AUDIO_CHANNELS],
+    tremble_muted: [bool; AUDIO_CHANNELS],
     cur_note_name: [Option<String>; AUDIO_CHANNELS],
 }
 
@@ -150,6 +157,13 @@ impl PlayerInner {
             pitch_active: [false; AUDIO_CHANNELS],
             pitch_target: [0; AUDIO_CHANNELS],
             pitch_cur: [0; AUDIO_CHANNELS],
+            fade_active: [false; AUDIO_CHANNELS],
+            fade_target: [0; AUDIO_CHANNELS],
+            fade_cur: [0; AUDIO_CHANNELS],
+            vol_fx_hold: [0; AUDIO_CHANNELS],
+            vol_fx_counter: [0; AUDIO_CHANNELS],
+            tremble_active: [false; AUDIO_CHANNELS],
+            tremble_muted: [false; AUDIO_CHANNELS],
             cur_note_name: std::array::from_fn(|_| None),
         }
     }
@@ -306,6 +320,7 @@ impl PlayerInner {
             self.set_voice_waveptr(ch, instrument);
             self.arp_active[ch] = false;
             self.pitch_active[ch] = false;
+            self.fade_active[ch] = false;
         }
 
         for r in 0..row {
@@ -386,12 +401,6 @@ impl PlayerInner {
         }
     }
 
-    fn apply_fade_in(&mut self, _ch: usize, _speed: u8) {}
-
-    fn apply_fade_out(&mut self, _ch: usize, _speed: u8) {}
-
-    fn apply_tremble(&mut self, _ch: usize, _speed: u8) {}
-
     fn trigger_channels(&mut self, pattern_idx: usize, row: usize) {
         for ch in 0..AUDIO_CHANNELS {
             let beat = &self.patterns[pattern_idx][ch + 1][row];
@@ -440,15 +449,6 @@ impl PlayerInner {
                 self.current_instrument[ch] = idx;
                 self.set_voice_waveptr(ch, idx);
             }
-            if let Some(x) = maybe_fade_in {
-                self.apply_fade_in(ch, x);
-            }
-            if let Some(x) = maybe_fade_out {
-                self.apply_fade_out(ch, x);
-            }
-            if let Some(x) = maybe_tremble {
-                self.apply_tremble(ch, x);
-            }
 
             if let Some(v) = maybe_vol {
                 self.remembered_vol[ch] = v;
@@ -470,6 +470,36 @@ impl PlayerInner {
                         self.set_voice_volume(ch, self.remembered_vol[ch]);
                     }
                 }
+            }
+
+            let cur_effective_vol = if self.muted[ch] { 0 } else { self.remembered_vol[ch] };
+            if let Some(x) = maybe_fade_in {
+                self.fade_active[ch] = true;
+                self.tremble_active[ch] = false;
+                self.fade_target[ch] = cur_effective_vol;
+                self.fade_cur[ch] = 0;
+                self.vol_fx_hold[ch] = x;
+                self.vol_fx_counter[ch] = x;
+                self.set_voice_volume(ch, 0);
+            } else if let Some(x) = maybe_fade_out {
+                self.fade_active[ch] = true;
+                self.tremble_active[ch] = false;
+                self.fade_target[ch] = 0;
+                self.fade_cur[ch] = cur_effective_vol;
+                self.vol_fx_hold[ch] = x;
+                self.vol_fx_counter[ch] = x;
+                self.set_voice_volume(ch, cur_effective_vol);
+            } else if let Some(x) = maybe_tremble {
+                self.fade_active[ch] = false;
+                self.tremble_active[ch] = true;
+                self.vol_fx_hold[ch] = x;
+                self.vol_fx_counter[ch] = x;
+                self.tremble_muted[ch] = false;
+                self.set_voice_volume(ch, cur_effective_vol);
+            } else {
+                self.fade_active[ch] = false;
+                self.tremble_active[ch] = false;
+                self.set_voice_volume(ch, cur_effective_vol);
             }
 
             if let Some((x, y)) = maybe_arp {
@@ -586,6 +616,41 @@ impl PlayerInner {
                 };
                 self.pitch_cur[ch] = next;
                 self.set_voice_frequency(ch, next);
+            }
+
+            if self.fade_active[ch] {
+                if self.vol_fx_counter[ch] == 0 {
+                    let cur = self.fade_cur[ch];
+                    let target = self.fade_target[ch];
+                    let next = if cur < target {
+                        cur + 1
+                    } else if cur > target {
+                        cur - 1
+                    } else {
+                        cur
+                    };
+                    self.fade_cur[ch] = next;
+                    self.set_voice_volume(ch, next);
+                    if next == target {
+                        self.fade_active[ch] = false;
+                    }
+                    self.vol_fx_counter[ch] = self.vol_fx_hold[ch];
+                } else {
+                    self.vol_fx_counter[ch] -= 1;
+                }
+            } else if self.tremble_active[ch] {
+                if self.vol_fx_counter[ch] == 0 {
+                    self.tremble_muted[ch] = !self.tremble_muted[ch];
+                    let vol = if self.tremble_muted[ch] || self.muted[ch] {
+                        0
+                    } else {
+                        self.remembered_vol[ch]
+                    };
+                    self.set_voice_volume(ch, vol);
+                    self.vol_fx_counter[ch] = self.vol_fx_hold[ch];
+                } else {
+                    self.vol_fx_counter[ch] -= 1;
+                }
             }
         }
     }

@@ -56,10 +56,6 @@ const FX_ID_FADE_OUT: u8 = 6;
 const FX_ID_TREMBLE: u8 = 7;
 const ARP_NO_THIRD_NOTE: u8 = 0xFF;
 
-fn apply_fade_in(_ch: usize, _speed: u8) {}
-fn apply_fade_out(_ch: usize, _speed: u8) {}
-fn apply_tremble(_ch: usize, _speed: u8) {}
-
 /// Drives the 7-channel wavetable synth from a gt-tracker export. Create one
 /// sequencer per track, point it at the `<name>_track` descriptor, then call
 /// `init_voices` once after loading the firmware and `tick` once per frame.
@@ -83,20 +79,36 @@ pub struct TrackSequencer {
 // Channel base note pitch, written by `advance_beat`. This is different than the active
 // note used by `advance_tick` which represents the frequency after applied effects.
 static mut BASE_FREQ: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
-// Whether the current channel and beat has an active arpeggio
-static mut ARP_ACTIVE: [bool; VOICE_COUNT] = [false; VOICE_COUNT];
+// Which glide effect is currently active
+const ACTIVE_FX_NONE: u8 = 0;
+const ACTIVE_FX_ARP: u8 = 1;
+const ACTIVE_FX_PITCH: u8 = 2;
+const ACTIVE_FX_FADE: u8 = 3;
+const ACTIVE_FX_TREMBLE: u8 = 4;
+static mut ACTIVE_FX: [u8; VOICE_COUNT] = [ACTIVE_FX_NONE; VOICE_COUNT];
 static mut ARP_X_FREQ: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
 static mut ARP_Y_FREQ: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
 // Keep track if the channel has a 2-note or 3-note arpeggio
 static mut ARP_STEP_COUNT: [u8; VOICE_COUNT] = [3; VOICE_COUNT];
 // Each channel's current position within its own arpeggio cycle
 static mut ARP_STEP: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
-// Whether the current channel and beat has an active PitchUp/PitchDown glide
-static mut PITCH_ACTIVE: [bool; VOICE_COUNT] = [false; VOICE_COUNT];
 // The baked frequency the glide is sliding toward
 static mut PITCH_TARGET: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
 // The glide's current frequency, moved toward PITCH_TARGET by `speed` each tick
 static mut PITCH_CUR: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
+// Track the volume column, so FadeIn/FadeOut know what to
+// glide to/from without needing to read hardware state back
+static mut CUR_VOL: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
+// Volume the fade is sliding toward (CUR_VOL for FadeIn, 0 for FadeOut)
+static mut FADE_TARGET: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
+// The glide's current volume
+static mut FADE_CUR: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
+// Ticks to hold each Fade volume step, or each Tremble on/off phase.
+static mut VOL_FX_HOLD: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
+// Ticks remaining until the next Fade step or Tremble toggle
+static mut VOL_FX_COUNTER: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
+// Whether the channel is currently in the muted half of its tremble cycle
+static mut TREMBLE_MUTED: [bool; VOICE_COUNT] = [false; VOICE_COUNT];
 
 // See the gt-tracker README for the track descriptor layout
 const TRACK_BPM_OFFSET: usize = 0;
@@ -191,7 +203,7 @@ impl TrackSequencer {
         let speed = self.speed << 2;
         unsafe {
             for ch in 0..VOICE_COUNT {
-                if ARP_ACTIVE[ch] {
+                if ACTIVE_FX[ch] == ACTIVE_FX_ARP {
                     let freq = match ARP_STEP[ch] {
                         0 => BASE_FREQ[ch],
                         1 => ARP_X_FREQ[ch],
@@ -203,13 +215,13 @@ impl TrackSequencer {
                     } else {
                         ARP_STEP[ch] + 1
                     };
-                } else if PITCH_ACTIVE[ch] {
+                } else if ACTIVE_FX[ch] == ACTIVE_FX_PITCH {
                     let cur = PITCH_CUR[ch];
                     let target = PITCH_TARGET[ch];
                     let next = if cur < target {
                         let stepped = cur.saturating_add(speed);
                         if stepped >= target {
-                            PITCH_ACTIVE[ch] = false;
+                            ACTIVE_FX[ch] = ACTIVE_FX_NONE;
                             target
                         } else {
                             stepped
@@ -217,17 +229,45 @@ impl TrackSequencer {
                     } else if cur > target {
                         let stepped = cur.saturating_sub(speed);
                         if stepped <= target {
-                            PITCH_ACTIVE[ch] = false;
+                            ACTIVE_FX[ch] = ACTIVE_FX_NONE;
                             target
                         } else {
                             stepped
                         }
                     } else {
-                        PITCH_ACTIVE[ch] = false;
+                        ACTIVE_FX[ch] = ACTIVE_FX_NONE;
                         target
                     };
                     PITCH_CUR[ch] = next;
                     v[ch].set_frequency(next);
+                } else if ACTIVE_FX[ch] == ACTIVE_FX_FADE {
+                    if VOL_FX_COUNTER[ch] == 0 {
+                        let cur = FADE_CUR[ch];
+                        let target = FADE_TARGET[ch];
+                        let next = if cur < target {
+                            cur + 1
+                        } else if cur > target {
+                            cur - 1
+                        } else {
+                            cur
+                        };
+                        FADE_CUR[ch] = next;
+                        v[ch].set_volume(next);
+                        if next == target {
+                            ACTIVE_FX[ch] = ACTIVE_FX_NONE;
+                        }
+                        VOL_FX_COUNTER[ch] = VOL_FX_HOLD[ch];
+                    } else {
+                        VOL_FX_COUNTER[ch] -= 1;
+                    }
+                } else if ACTIVE_FX[ch] == ACTIVE_FX_TREMBLE {
+                    if VOL_FX_COUNTER[ch] == 0 {
+                        TREMBLE_MUTED[ch] = !TREMBLE_MUTED[ch];
+                        v[ch].set_volume(if TREMBLE_MUTED[ch] { 0 } else { CUR_VOL[ch] });
+                        VOL_FX_COUNTER[ch] = VOL_FX_HOLD[ch];
+                    } else {
+                        VOL_FX_COUNTER[ch] -= 1;
+                    }
                 }
             }
         }
@@ -330,12 +370,22 @@ impl TrackSequencer {
             let fx_x = unsafe { *data.add(base + off_fx_x + beat) };
             let fx_y = unsafe { *data.add(base + off_fx_y + beat) };
 
+            // Whether a glide effect was in progress before this beat, so
+            // switching to a non-glide fx only resets hardware that a glide
+            // actually left in a non-resting state.
+            let prev_fx = unsafe { ACTIVE_FX[ch] };
+            let had_freq_fx = prev_fx == ACTIVE_FX_ARP || prev_fx == ACTIVE_FX_PITCH;
+            let had_vol_fx = prev_fx == ACTIVE_FX_FADE || prev_fx == ACTIVE_FX_TREMBLE;
+
             if lo | hi != 0 {
                 unsafe {
                     BASE_FREQ[ch] = lo | (hi << 8);
                 }
             }
             if vol != 0xFF {
+                unsafe {
+                    CUR_VOL[ch] = vol;
+                }
                 v[ch].set_volume(vol);
             }
 
@@ -345,37 +395,66 @@ impl TrackSequencer {
                 let arp_y_lo = unsafe { *data.add(base + off_fx_freq_y_lo + beat) } as u16;
                 let arp_y_hi = unsafe { *data.add(base + off_fx_freq_y_hi + beat) } as u16;
                 unsafe {
-                    ARP_ACTIVE[ch] = true;
+                    ACTIVE_FX[ch] = ACTIVE_FX_ARP;
                     ARP_X_FREQ[ch] = arp_x_lo | (arp_x_hi << 8);
                     ARP_Y_FREQ[ch] = arp_y_lo | (arp_y_hi << 8);
                     ARP_STEP_COUNT[ch] = if fx_y == ARP_NO_THIRD_NOTE { 2 } else { 3 };
                     ARP_STEP[ch] = 0;
-                    PITCH_ACTIVE[ch] = false;
                 }
                 any_active = true;
             } else if fx_id == FX_ID_PITCH_UP || fx_id == FX_ID_PITCH_DOWN {
                 let target_lo = unsafe { *data.add(base + off_fx_freq_x_lo + beat) } as u16;
                 let target_hi = unsafe { *data.add(base + off_fx_freq_x_hi + beat) } as u16;
                 unsafe {
-                    ARP_ACTIVE[ch] = false;
-                    PITCH_ACTIVE[ch] = true;
+                    ACTIVE_FX[ch] = ACTIVE_FX_PITCH;
                     PITCH_TARGET[ch] = target_lo | (target_hi << 8);
                     PITCH_CUR[ch] = BASE_FREQ[ch];
                     v[ch].set_frequency(PITCH_CUR[ch]);
                 }
                 any_active = true;
-            } else {
-                match fx_id {
-                    FX_ID_INSTRUMENT => v[ch].set_wavetable(WAVETABLE[fx_x as usize]),
-                    FX_ID_FADE_IN => apply_fade_in(ch, fx_x),
-                    FX_ID_FADE_OUT => apply_fade_out(ch, fx_x),
-                    FX_ID_TREMBLE => apply_tremble(ch, fx_x),
-                    _ => {}
-                }
+            } else if fx_id == FX_ID_FADE_IN || fx_id == FX_ID_FADE_OUT {
                 unsafe {
-                    ARP_ACTIVE[ch] = false;
-                    PITCH_ACTIVE[ch] = false;
-                    v[ch].set_frequency(BASE_FREQ[ch]);
+                    ACTIVE_FX[ch] = ACTIVE_FX_FADE;
+                    if fx_id == FX_ID_FADE_IN {
+                        FADE_TARGET[ch] = CUR_VOL[ch];
+                        FADE_CUR[ch] = 0;
+                    } else {
+                        FADE_TARGET[ch] = 0;
+                        FADE_CUR[ch] = CUR_VOL[ch];
+                    }
+                    v[ch].set_volume(FADE_CUR[ch]);
+                    VOL_FX_HOLD[ch] = fx_x;
+                    VOL_FX_COUNTER[ch] = fx_x;
+                }
+                any_active = true;
+            } else if fx_id == FX_ID_INSTRUMENT {
+                v[ch].set_wavetable(WAVETABLE[fx_x as usize]);
+                unsafe {
+                    ACTIVE_FX[ch] = ACTIVE_FX_NONE;
+                    if had_freq_fx {
+                        v[ch].set_frequency(BASE_FREQ[ch]);
+                    }
+                    if had_vol_fx {
+                        v[ch].set_volume(CUR_VOL[ch]);
+                    }
+                }
+            } else if fx_id == FX_ID_TREMBLE {
+                unsafe {
+                    ACTIVE_FX[ch] = ACTIVE_FX_TREMBLE;
+                    VOL_FX_HOLD[ch] = fx_x;
+                    VOL_FX_COUNTER[ch] = fx_x;
+                    TREMBLE_MUTED[ch] = false;
+                }
+                any_active = true;
+            } else {
+                unsafe {
+                    ACTIVE_FX[ch] = ACTIVE_FX_NONE;
+                    if had_freq_fx {
+                        v[ch].set_frequency(BASE_FREQ[ch]);
+                    }
+                    if had_vol_fx {
+                        v[ch].set_volume(CUR_VOL[ch]);
+                    }
                 }
             }
             base += channel_stride;

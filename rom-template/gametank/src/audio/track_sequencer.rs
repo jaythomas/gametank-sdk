@@ -1,4 +1,4 @@
-use super::wavetable_8ch::{VOICE_COUNT, WAVETABLE, voices};
+use super::wavetable::{VOICE_COUNT, WAVETABLE, voices};
 use crate::console::Console;
 
 const SAMPLE_RATE_REG: u8 = 0xCB;

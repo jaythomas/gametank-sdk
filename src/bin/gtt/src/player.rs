@@ -13,7 +13,7 @@ use crate::file::NUM_INSTRUMENTS;
 use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
 
 const FIRMWARE: &[u8; 4096] =
-    include_bytes!("../../../../rom-template/gametank/audiofw/wavetable-8ch.bin");
+    include_bytes!("../../../../rom-template/gametank/audiofw/wavetable.bin");
 
 const ROWS_PER_PATTERN: usize = 64;
 const AUDIO_CHANNELS: usize = 7;

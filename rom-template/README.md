@@ -54,10 +54,10 @@ cargo +mos build --release
 One of the two audio firmwares is selected at build time via Cargo
 features on the `rom` crate:
 
-| cargo feature                   | firmware                  | description                 |
-| ------------------------------- | ------------------------- | --------------------------- |
-| `audio-fm-4ch`                  | 4-channel FM synth        | ADSR envelopes per operator |
-| `audio-wavetable-8ch` (default) | 8-channel wavetable synth | volume 0-63                 |
+| cargo feature               | firmware                  | description                 |
+| ----------------------------| ------------------------- | --------------------------- |
+| `audio-fm-4ch`              | 4-channel FM synth        | ADSR envelopes per operator |
+| `audio-wavetable` (default) | 7-channel wavetable synth | volume 0-63                 |
 
 Build with a specific backend using `--no-default-features --features <name>`:
 
@@ -65,11 +65,11 @@ Build with a specific backend using `--no-default-features --features <name>`:
 # FM synthesis
 cargo +mos build --release --no-default-features --features audio-fm-4ch
 
-# Default 8-channel wavetable synth
+# Default wavetable synth
 cargo +mos build --release
 ```
 
-Currently, only the wavetable-8ch firmware is supported by `gtt`, the GameTank music tracker.
+Only the wavetable firmware is supported by gt-tracker (`gtt`), the GameTank music tracker.
 
 
 ### Initialization
@@ -123,12 +123,13 @@ fn main(console: &mut Console) {
 For multiple tracks, create one `TrackSequencer` per track and call `tick()` on whichever is currently active.
 
 **Note on shared instruments:** the ACP firmware has 11 fixed instrument slots for the whole ROM.
-If you export multiple tracks into one project, ensure `wave.asm` and `instruments/` contain all the shared instruments needed.
+If you export multiple tracks into one project, ensure `instruments/` contains all the shared instruments needed.
 
+**Note on game sounds:** As a convention, you should leave one channel in your track empty when using it as background music during gameplay, That way you have a dedicated voice that doesn't conflict with the track sequencer and cause wonky audio.
 
 ### Wavetables
 
-The `wavetable-8ch` firmware has 11 instrument slots.
+The `wavetable` firmware has 11 instrument slots.
 
 `gametank::audio::WAVETABLE` array holds the ACP-side address for each slot (`0x0300`, `0x400`... `0x0D00`).
 Pass one of these to `voice.set_wavetable()`.
@@ -204,9 +205,9 @@ without racing the ACP's per-sample read of those same locations.
   which the container and nix devShell provide. The linker config
   (`gametank-acp.cfg`) lays out zero page ($0-$FF), stack, and code
   to produce an exact 4096-byte image matching the ACP's address space.
-- **Wavetable firmwares* (`gametank/audiofw-src/wavetable-8ch/`) is a llvm-mos-style
+- **Wavetable firmwares* (`gametank/audiofw-src/wavetable/`) is a llvm-mos-style
   assembly. `gametank/build.rs` automatically assembles and links them into
-  `gametank/audiofw/wavetable-8ch.bin` whenever the corresponding feature
+  `gametank/audiofw/wavetable.bin` whenever the corresponding feature
   is enabled. This requires `mos-clang` and `llvm-objcopy`, which the
   container and nix devShell provide. If those tools are not available
   the pre-built binary in `audiofw/` is used as a fallback.

@@ -98,6 +98,18 @@ impl TrackerContainer {
         self.update_tuning_context(tuning);
     }
 
+    pub fn active_channel(&self) -> Option<usize> {
+        self.pattern_editor.active_channel()
+    }
+
+    pub fn is_channel_muted(&self, ch: usize) -> bool {
+        self.pattern_editor.is_channel_muted(ch)
+    }
+
+    pub fn set_channel_muted(&mut self, ch: usize, muted: bool) {
+        self.pattern_editor.set_channel_muted(ch, muted);
+    }
+
     fn update_tuning_context(&mut self, tuning: &TuningData) {
         let scale_size = tuning.scale.len();
         let note_count = tuning.notes.len();

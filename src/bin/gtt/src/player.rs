@@ -31,6 +31,7 @@ pub enum PlayerCmd {
     UpdatePatterns(Vec<Pattern>, Vec<u8>),
     UpdateWaveform(usize, Box<[u8; 256]>),
     UpdateTuningNotes(IndexMap<String, f64>),
+    SetChannelMuted(usize, bool),
 }
 
 struct PlayerInner {
@@ -66,6 +67,7 @@ struct PlayerInner {
     output_channels: usize,
     remembered_vol: [u8; AUDIO_CHANNELS],
     muted: [bool; AUDIO_CHANNELS],
+    channel_muted: [bool; AUDIO_CHANNELS],
     base_freq: [u16; AUDIO_CHANNELS],
     current_instrument: [usize; AUDIO_CHANNELS],
     arp_active: [bool; AUDIO_CHANNELS],
@@ -147,6 +149,7 @@ impl PlayerInner {
             output_channels,
             remembered_vol: [0; AUDIO_CHANNELS],
             muted: [false; AUDIO_CHANNELS],
+            channel_muted: [false; AUDIO_CHANNELS],
             base_freq: [0; AUDIO_CHANNELS],
             current_instrument: std::array::from_fn(|ch| ch),
             arp_active: [false; AUDIO_CHANNELS],
@@ -239,6 +242,17 @@ impl PlayerInner {
                 PlayerCmd::UpdateTuningNotes(notes) => {
                     self.tuning_notes = notes;
                 }
+                PlayerCmd::SetChannelMuted(ch, want_muted) => {
+                    if ch < AUDIO_CHANNELS {
+                        self.channel_muted[ch] = want_muted;
+                        if want_muted {
+                            self.set_voice_volume(ch, 0);
+                        } else {
+                            let vol = self.current_channel_volume(ch);
+                            self.set_voice_volume(ch, vol);
+                        }
+                    }
+                }
             }
         }
     }
@@ -272,9 +286,22 @@ impl PlayerInner {
 
     fn set_voice_volume(&mut self, ch: usize, volume: u8) {
         let base = 0x0041 + (ch * 7);
+        let volume = if self.channel_muted[ch] { 0 } else { volume.min(63) };
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
-            (*aram_ptr)[base + 6] = volume.min(63);
+            (*aram_ptr)[base + 6] = volume;
+        }
+    }
+
+    fn current_channel_volume(&self, ch: usize) -> u8 {
+        if self.muted[ch] {
+            0
+        } else if self.fade_active[ch] {
+            self.fade_cur[ch]
+        } else if self.tremble_active[ch] && self.tremble_muted[ch] {
+            0
+        } else {
+            self.remembered_vol[ch]
         }
     }
 
@@ -848,5 +875,9 @@ impl Player {
 
     pub fn update_tuning_notes(&self, notes: IndexMap<String, f64>) {
         let _ = self.cmd_tx.send(PlayerCmd::UpdateTuningNotes(notes));
+    }
+
+    pub fn set_channel_muted(&self, ch: usize, muted: bool) {
+        let _ = self.cmd_tx.send(PlayerCmd::SetChannelMuted(ch, muted));
     }
 }

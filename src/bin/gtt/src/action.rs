@@ -25,4 +25,7 @@ pub enum ComponentAction {
     PatternDelete,
     PatternZap,
     OpenPatternDeleteConfirm,
+    MuteChannel,
+    UnmuteChannel,
+    ToggleMuteChannel,
 }

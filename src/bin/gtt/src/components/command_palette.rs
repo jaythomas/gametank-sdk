@@ -35,6 +35,9 @@ impl CommandPalette {
             "q" | "quit" => actions.push(ComponentAction::Quit),
             "w" | "write" => actions.push(ComponentAction::SaveFile),
             "wq" | "write-quit" => actions.push(ComponentAction::SaveAndQuit),
+            "mute" => actions.push(ComponentAction::MuteChannel),
+            "unmute" => actions.push(ComponentAction::UnmuteChannel),
+            "m" => actions.push(ComponentAction::ToggleMuteChannel),
             _ => {}
         }
         self.input.set_value("");

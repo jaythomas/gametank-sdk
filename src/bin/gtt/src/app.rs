@@ -220,13 +220,27 @@ impl App {
     fn handle_actions(&mut self, actions: Vec<ComponentAction>) -> std::io::Result<bool> {
         for action in actions {
             match action {
-                ComponentAction::Quit => return Ok(true),
-                ComponentAction::SaveAndQuit => {
-                    self.write_file()?;
-                    return Ok(true);
+                ComponentAction::ConfirmExport(path) => {
+                    let _ = std::fs::remove_dir_all(&path);
+                    match self.run_export(&path) {
+                        Ok(()) => {
+                            self.export_confirm.visible = false;
+                            self.tracker_container.mark_export_success();
+                        }
+                        Err(_) => {
+                            self.export_confirm.set_error();
+                        }
+                    }
                 }
-                ComponentAction::SaveFile => {
-                    self.write_file()?;
+                ComponentAction::CreateNewFile(path) => {
+                    self.file_data = TrackerFile::empty();
+                    self.file_data.tuning.key_assignments =
+                        config_to_tuning_keys(&self.config.bindings.key_assignments);
+                    self.input_path = path;
+                    self.tracker_container = TrackerContainer::init(&self.file_data);
+                    if let Some(player) = &mut self.player {
+                        player.pause();
+                    }
                 }
                 ComponentAction::Export => {
                     let export_dir = self.export_dir();
@@ -241,17 +255,108 @@ impl App {
                         }
                     }
                 }
-                ComponentAction::ConfirmExport(path) => {
-                    let _ = std::fs::remove_dir_all(&path);
-                    match self.run_export(&path) {
-                        Ok(()) => {
-                            self.export_confirm.visible = false;
-                            self.tracker_container.mark_export_success();
-                        }
-                        Err(_) => {
-                            self.export_confirm.set_error();
+                ComponentAction::InstrumentSaved(idx, waveform) => {
+                    self.file_data.instruments[idx].waveform = waveform.to_vec();
+                }
+                ComponentAction::MuteChannel => {
+                    if let Some(ch) = self.tracker_container.active_channel() {
+                        self.tracker_container.set_channel_muted(ch, true);
+                        if let Some(player) = &self.player {
+                            player.set_channel_muted(ch, true);
                         }
                     }
+                }
+                ComponentAction::OpenFile(path) => match TrackerFile::load(&path) {
+                    Ok(mut file_data) => {
+                        file_data.tuning.key_assignments =
+                            config_to_tuning_keys(&self.config.bindings.key_assignments);
+                        self.file_data = file_data;
+                        self.input_path = path;
+                        self.tracker_container = TrackerContainer::init(&self.file_data);
+                        if let Some(player) = &mut self.player {
+                            player.pause();
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load file: {}", e);
+                    }
+                },
+                ComponentAction::OpenFileBrowser => {
+                    self.file_browser.visible = true;
+                    if self.file_browser.file_explorer.is_none() {
+                        self.file_browser.open_file_explorer();
+                    }
+                }
+                ComponentAction::OpenInstrumentEditor(idx) => {
+                    let name = self.tracker_container.get_instrument_names()[idx].clone();
+                    let waveform = self.file_data.instrument_waveform(idx);
+                    self.instrument_editor.open(idx, &name, &waveform);
+                }
+                ComponentAction::OpenPatternDeleteConfirm => {
+                    if self.file_data.patterns.len() <= 1 {
+                        let idx = self.tracker_container.pattern_idx();
+                        *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
+                        self.file_data.set_beats_for(idx, 64);
+                    } else {
+                        self.pattern_delete_confirm.open();
+                    }
+                }
+                ComponentAction::OpenQuitConfirm => {
+                    self.quit_confirm.open();
+                }
+                ComponentAction::OpenTuningEditor => {
+                    self.tuning_editor.open(&self.file_data.tuning);
+                }
+                ComponentAction::PatternCopy => {
+                    let idx = self.tracker_container.pattern_idx() as usize;
+                    let copy = self.file_data.current_pattern(idx as u8).clone();
+                    let beats = self.file_data.beats_for(idx as u8);
+                    let insert_at = (idx + 1).min(self.file_data.patterns.len());
+                    self.file_data.patterns.insert(insert_at, copy);
+                    self.file_data.pattern_beats.insert(insert_at, beats);
+                    self.tracker_container.set_pattern_idx(insert_at as u8);
+                }
+                ComponentAction::PatternDelete => {
+                    let idx = self.tracker_container.pattern_idx() as usize;
+                    if self.file_data.patterns.len() <= 1 {
+                        self.file_data.patterns[0] = crate::tracker::empty_pattern();
+                        self.file_data.pattern_beats[0] = 64;
+                    } else if idx < self.file_data.patterns.len() {
+                        self.file_data.patterns.remove(idx);
+                        if idx < self.file_data.pattern_beats.len() {
+                            self.file_data.pattern_beats.remove(idx);
+                        }
+                        let new_last = (self.file_data.patterns.len() - 1) as u8;
+                        let new_idx = idx.min(new_last as usize) as u8;
+                        self.tracker_container.set_pattern_idx(new_idx);
+                    }
+                }
+                ComponentAction::PatternNew => {
+                    let idx = self.tracker_container.pattern_idx() as usize;
+                    let insert_at = (idx + 1).min(self.file_data.patterns.len());
+                    self.file_data
+                        .patterns
+                        .insert(insert_at, crate::tracker::empty_pattern());
+                    self.file_data.pattern_beats.insert(insert_at, 64);
+                    self.tracker_container.set_pattern_idx(insert_at as u8);
+                }
+                ComponentAction::PatternNext => {
+                    let idx = self.tracker_container.pattern_idx();
+                    let last = (self.file_data.patterns.len().max(1) - 1) as u8;
+                    if idx < last {
+                        self.tracker_container.set_pattern_idx(idx + 1);
+                    }
+                }
+                ComponentAction::PatternPrev => {
+                    let idx = self.tracker_container.pattern_idx();
+                    if idx > 0 {
+                        self.tracker_container.set_pattern_idx(idx - 1);
+                    }
+                }
+                ComponentAction::PatternZap => {
+                    let idx = self.tracker_container.pattern_idx();
+                    *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
+                    self.file_data.set_beats_for(idx, 64);
                 }
                 ComponentAction::Play => {
                     if let Some(player) = &self.player {
@@ -275,110 +380,23 @@ impl App {
                         }
                     }
                 }
-                ComponentAction::OpenInstrumentEditor(idx) => {
-                    let name = self.tracker_container.get_instrument_names()[idx].clone();
-                    let waveform = self.file_data.instrument_waveform(idx);
-                    self.instrument_editor.open(idx, &name, &waveform);
+                ComponentAction::Quit => return Ok(true),
+                ComponentAction::RequestFocus => {}
+                ComponentAction::SaveAndQuit => {
+                    self.write_file()?;
+                    return Ok(true);
                 }
-                ComponentAction::OpenTuningEditor => {
-                    self.tuning_editor.open(&self.file_data.tuning);
+                ComponentAction::SaveFile => {
+                    self.write_file()?;
                 }
-                ComponentAction::OpenFileBrowser => {
-                    self.file_browser.visible = true;
-                    if self.file_browser.file_explorer.is_none() {
-                        self.file_browser.open_file_explorer();
-                    }
-                }
-                ComponentAction::OpenFile(path) => match TrackerFile::load(&path) {
-                    Ok(mut file_data) => {
-                        file_data.tuning.key_assignments =
-                            config_to_tuning_keys(&self.config.bindings.key_assignments);
-                        self.file_data = file_data;
-                        self.input_path = path;
-                        self.tracker_container = TrackerContainer::init(&self.file_data);
-                        if let Some(player) = &mut self.player {
-                            player.pause();
+                ComponentAction::ToggleMuteChannel => {
+                    if let Some(ch) = self.tracker_container.active_channel() {
+                        let muted = !self.tracker_container.is_channel_muted(ch);
+                        self.tracker_container.set_channel_muted(ch, muted);
+                        if let Some(player) = &self.player {
+                            player.set_channel_muted(ch, muted);
                         }
                     }
-                    Err(e) => {
-                        eprintln!("Failed to load file: {}", e);
-                    }
-                },
-                ComponentAction::CreateNewFile(path) => {
-                    self.file_data = TrackerFile::empty();
-                    self.file_data.tuning.key_assignments =
-                        config_to_tuning_keys(&self.config.bindings.key_assignments);
-                    self.input_path = path;
-                    self.tracker_container = TrackerContainer::init(&self.file_data);
-                    if let Some(player) = &mut self.player {
-                        player.pause();
-                    }
-                }
-                ComponentAction::OpenQuitConfirm => {
-                    self.quit_confirm.open();
-                }
-                ComponentAction::PatternPrev => {
-                    let idx = self.tracker_container.pattern_idx();
-                    if idx > 0 {
-                        self.tracker_container.set_pattern_idx(idx - 1);
-                    }
-                }
-                ComponentAction::PatternNext => {
-                    let idx = self.tracker_container.pattern_idx();
-                    let last = (self.file_data.patterns.len().max(1) - 1) as u8;
-                    if idx < last {
-                        self.tracker_container.set_pattern_idx(idx + 1);
-                    }
-                }
-                ComponentAction::PatternNew => {
-                    let idx = self.tracker_container.pattern_idx() as usize;
-                    let insert_at = (idx + 1).min(self.file_data.patterns.len());
-                    self.file_data
-                        .patterns
-                        .insert(insert_at, crate::tracker::empty_pattern());
-                    self.file_data.pattern_beats.insert(insert_at, 64);
-                    self.tracker_container.set_pattern_idx(insert_at as u8);
-                }
-                ComponentAction::PatternCopy => {
-                    let idx = self.tracker_container.pattern_idx() as usize;
-                    let copy = self.file_data.current_pattern(idx as u8).clone();
-                    let beats = self.file_data.beats_for(idx as u8);
-                    let insert_at = (idx + 1).min(self.file_data.patterns.len());
-                    self.file_data.patterns.insert(insert_at, copy);
-                    self.file_data.pattern_beats.insert(insert_at, beats);
-                    self.tracker_container.set_pattern_idx(insert_at as u8);
-                }
-                ComponentAction::OpenPatternDeleteConfirm => {
-                    if self.file_data.patterns.len() <= 1 {
-                        let idx = self.tracker_container.pattern_idx();
-                        *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
-                        self.file_data.set_beats_for(idx, 64);
-                    } else {
-                        self.pattern_delete_confirm.open();
-                    }
-                }
-                ComponentAction::PatternDelete => {
-                    let idx = self.tracker_container.pattern_idx() as usize;
-                    if self.file_data.patterns.len() <= 1 {
-                        self.file_data.patterns[0] = crate::tracker::empty_pattern();
-                        self.file_data.pattern_beats[0] = 64;
-                    } else if idx < self.file_data.patterns.len() {
-                        self.file_data.patterns.remove(idx);
-                        if idx < self.file_data.pattern_beats.len() {
-                            self.file_data.pattern_beats.remove(idx);
-                        }
-                        let new_last = (self.file_data.patterns.len() - 1) as u8;
-                        let new_idx = idx.min(new_last as usize) as u8;
-                        self.tracker_container.set_pattern_idx(new_idx);
-                    }
-                }
-                ComponentAction::PatternZap => {
-                    let idx = self.tracker_container.pattern_idx();
-                    *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
-                    self.file_data.set_beats_for(idx, 64);
-                }
-                ComponentAction::InstrumentSaved(idx, waveform) => {
-                    self.file_data.instruments[idx].waveform = waveform.to_vec();
                 }
                 ComponentAction::TuningSaved(tuning) => {
                     self.file_data.tuning = tuning.clone();
@@ -387,7 +405,14 @@ impl App {
                         build_key_assignments(&tuning.key_assignments);
                     let _ = confy::store("gtt", None, &self.config);
                 }
-                ComponentAction::RequestFocus => {}
+                ComponentAction::UnmuteChannel => {
+                    if let Some(ch) = self.tracker_container.active_channel() {
+                        self.tracker_container.set_channel_muted(ch, false);
+                        if let Some(player) = &self.player {
+                            player.set_channel_muted(ch, false);
+                        }
+                    }
+                }
             }
         }
         Ok(false)

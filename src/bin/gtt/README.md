@@ -41,11 +41,11 @@ Using the tab key toggles focus between the control deck and the pattern editor.
 
 ## Pattern editor
 
-Use the arrow keys, page-up/page-down, and the mouse cursor to navigate between row and columns.
+Use the arrow keys, page-up/page-down, and the mouse cursor to navigate between rows and columns.
 At the top of the pattern editor you'll see:
 
 ```
-BEAT  SEQ  ch0 v ::↗↘   ch1 v ::↗↘   ...
+BEAT  SEQ  ch0 v :↗↘   ch1 v :↗↘   ...
 ```
 
 **BEATS** are represented by the number to the left of each row.
@@ -73,7 +73,7 @@ The default tuning is mapped similar to a piano roll. This is QWERTY-agnostic, b
 
 ```
  Note OFF
- ┊     C♯5 D♯5     F♯5 G♯5 A♯5     C♯6 D♯6     F#6
+ ┊     C♯5 D♯5     F♯5 G♯5 A♯5     C♯6 D♯6     F♯6
  ┊   C5┊ D5┊ E5  F5┊ G5┊ A5┊ B5  C6┊ D6┊ E6  F6┊ G6
  ~   │ ┊ │ ┊ │   │ ┊ │ ┊ │ ┊ │   │ ┊ │ ┊ │   │ ┊ │
  ` 1 │ 2 │ 3 │ 4 │ 5 │ 6 │ 7 │ 8 │ 9 │ 0 │ - │ = │
@@ -93,7 +93,7 @@ See the [Tuning editor](#tuning-editor) for how to update these mappings.
 | ID | Label       | Parameters                                               | Description                                    |
 | -- | -----       | ----------                                               | -----------                                    |
 | 0  | (no effect) |                                                          |                                                |
-| 1  | Instrument  | x (0-F) = instrument index                               | Switch which instrument this channel is using. |
+| 1  | Instrument  | x (0-A) = instrument index                               | Switch which instrument this channel is using. |
 | 2  | Arpeggio    | x (0-F) = how many steps up to the second note,<br>y (0-F) = optional, steps up for a third note. | The arpeggiation steps to its next note once per tick, and FxSpeed sets how many ticks occur per beat. So an FxSpeed of `05` yields 3 ticks/notes a beat. |
 | 3  | PitchUp     | x (00-FF) = how many steps up to slide to                | Portamento that increments at a rate of FxSpeed. |
 | 4  | PitchDown   | x (00-FF) = how many steps down to slide to              | Portamento that decrements at a rate of FxSpeed. |
@@ -115,7 +115,7 @@ The control deck allows you to edit global track parameters, pattern-level param
 
 **Instruments** - there are 11 total instruments, which can be swapped out on any beat on any channel to provide a lot of versatility. The 11 instruments can be renamed from here, and their waveforms opened in the instrument editor from the `[⚙]` buttons.
 
-**Tuning editor** opens the [tuning editor](#turning-editor) for key assignment.
+**Tuning editor** opens the [tuning editor](#tuning-editor) for key assignment.
 
 **New/Open** will allow you to open an existing file or create a new file (press `n`). Default name is `track.gtt` or `track{n}.gtt` to avoid overwriting. Be sure to save before opening another file.
 
@@ -123,7 +123,7 @@ The control deck allows you to edit global track parameters, pattern-level param
 
 **Quit** will prompt to save changes before exiting so that you don't accidentally close the program with unsaved changes.
 
-**Export** save the track, instruments, and tuning into a format consumable by the project. See [Using your tracks](#using-your-tracks) below.
+**Export** saves the track, instruments, and tuning into a format consumable by the project. See [Using your tracks](#using-your-tracks) below.
 
 
 ## Command palette
@@ -132,12 +132,15 @@ This provides quick keyboard-driven actions. All the commands available on the c
 When you start typing `:` your command input will start appearing at the very bottom of the screen.
 Press Enter to execute or Esc to cancel the command input.
 
-| command          | description            |
-| -------          | -----------            |
-| `:exp`/`:export` | export track           |
-| `:instrument`    | open instrument editor |
-| `:w`/`:write`    | save changes to file   |
-| `:q`/`:quit`     | quit the application   |
+| command          | description                             |
+| -------          | -----------                             |
+| `:exp`/`:export` | export track                            |
+| `:instrument`    | open instrument editor                  |
+| `:m`             | toggle mute on the active voice channel |
+| `:mute`          | mute the active voice channel           |
+| `:unmute`        | unmute the active voice channel         |
+| `:q`/`:quit`     | quit the application                    |
+| `:w`/`:write`    | save changes to file                    |
 
 TODO: lots more commands
 
@@ -146,7 +149,7 @@ TODO: lots more commands
 
 ![gt-tracker instrument editor screenshot](./screenshot2.png)
 
-An instrument is a 256-byte waveform, 8 bytes of 8-byte data points.
+An instrument is a 256-sample waveform, 256 single-byte data points.
 This is represented by 256 bars (00-FF) with adjustable height.
 You can adjust the data points by dragging the mouse cursor like a brush stroke.
 For fine tuning the values, you also have the arrow keys.
@@ -163,8 +166,6 @@ For exporting and importing, you can use the `[Export]` button on the Control De
 Simply click `[Cancel]` or `[Save]` when done.
 
 ## Tuning editor
-
-13983 / 65536 = ~0.2134
 
 This window serves two purposes.
 One, it defines the music notation mapping used for pattern editing, in other words the tuning system used as the basis for your music.
@@ -225,15 +226,16 @@ The exported `<name>-export/<name>.bin` is made of three parts:
 
 **3. Pattern data blocks**, one per table entry above. Located at the offset given by that entry. Each block is laid out as:
 
-> [0] beats: u8 (row count for this pattern)
-> per channel, each array sized to `beats` bytes:
->  freq_lo[beats], freq_hi[beats]   16-bit phase increment; 0x0000 holds the previous note
->  vol[beats]                       0-63, or 0xFF to hold the previous volume
->  fx_id[beats]                     equal to the channel effect ID (see channel FX definitions above); 0 = no effect
->  fx_x[beats], fx_y[beats]         raw effect parameters (scale-degree offsets for Arpeggio/PitchUp/PitchDown)
->  fx_freq_x_lo/hi[beats]           baked target frequency for fx_x (Arpeggio's +x note, or PitchUp/PitchDown's slide target)
->  fx_freq_y_lo/hi[beats]           baked +y scale-degree frequency (Arpeggio only)
->  seq_cmd_type[beats]              equal to the sequence command ID (see SEQ definitions above); 0 = no command
->  seq_cmd_value[beats]             raw command value (unused for Stop; pattern index for CountJump)
->  seq_cmd_value2[beats]            second raw command value (only used for CountJump: target beat)
-
+```
+[0] beats: u8 (row count for this pattern)
+per channel, each array sized to `beats` bytes:
+  freq_lo[beats], freq_hi[beats]   16-bit phase increment; 0x0000 holds the previous note
+  vol[beats]                       0-63, or 0xFF to hold the previous volume
+  fx_id[beats]                     equal to the channel effect ID (see channel FX definitions above); 0 = no effect
+  fx_x[beats], fx_y[beats]         raw effect parameters (scale-degree offsets for Arpeggio/PitchUp/PitchDown)
+  fx_freq_x_lo/hi[beats]           baked target frequency for fx_x (Arpeggio's +x note, or PitchUp/PitchDown's slide target)
+  fx_freq_y_lo/hi[beats]           baked +y scale-degree frequency (Arpeggio only)
+  seq_cmd_type[beats]              equal to the sequence command ID (see SEQ definitions above); 0 = no command
+  seq_cmd_value[beats]             raw command value (unused for Stop; pattern index for CountJump)
+  seq_cmd_value2[beats]            second raw command value (only used for CountJump: target beat)
+```

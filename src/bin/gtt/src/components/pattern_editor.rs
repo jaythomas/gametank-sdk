@@ -157,6 +157,7 @@ pub struct PatternEditor {
     seq_choice: ChoiceState<usize>,
     seq_choice_cell: Option<(u8, u8)>,
     seq_edit: Option<((u8, u8), u8)>,
+    channel_muted: [bool; 7],
 }
 
 impl PatternEditor {
@@ -199,6 +200,7 @@ impl PatternEditor {
             seq_choice: ChoiceState::new(),
             seq_choice_cell: None,
             seq_edit: None,
+            channel_muted: [false; 7],
         }
     }
 
@@ -206,6 +208,18 @@ impl PatternEditor {
 
     pub fn set_transpose(&mut self, transpose: i32) {
         self.transpose = transpose;
+    }
+
+    pub fn active_channel(&self) -> Option<usize> {
+        self.lanes[self.sel_x as usize].ch
+    }
+
+    pub fn is_channel_muted(&self, ch: usize) -> bool {
+        self.channel_muted[ch]
+    }
+
+    pub fn set_channel_muted(&mut self, ch: usize, muted: bool) {
+        self.channel_muted[ch] = muted;
     }
 
     fn get_channel_beat(ch: Option<usize>, beat: u8, pattern: &Pattern) -> &Beat {
@@ -959,14 +973,33 @@ impl Component for PatternEditor {
             .lanes
             .iter()
             .map(|lane| {
+                let muted = lane.ch.is_some_and(|ch| self.channel_muted[ch]);
                 let span = match lane.kind {
                     LaneKind::Beat => Span::from(lane.title.clone()),
                     LaneKind::Seq => Span::from(lane.title.clone()),
-                    LaneKind::Note => Span::from(lane.title.clone())
-                        .fg(ch_colors[lane.ch.unwrap()])
-                        .italic(),
-                    LaneKind::Vol => Span::from(lane.title.clone()).fg(ch_colors[lane.ch.unwrap()]),
-                    LaneKind::Fx => Span::from(lane.title.clone()).fg(ch_colors[lane.ch.unwrap()]),
+                    LaneKind::Note => {
+                        if muted {
+                            Span::from("  MUT")
+                        } else {
+                            Span::from(lane.title.clone())
+                                .fg(ch_colors[lane.ch.unwrap()])
+                                .italic()
+                        }
+                    }
+                    LaneKind::Vol => {
+                        if muted {
+                            Span::from("ED  ")
+                        } else {
+                            Span::from(lane.title.clone()).fg(ch_colors[lane.ch.unwrap()])
+                        }
+                    }
+                    LaneKind::Fx => {
+                        if muted {
+                            Span::from(lane.title.clone())
+                        } else {
+                            Span::from(lane.title.clone()).fg(ch_colors[lane.ch.unwrap()])
+                        }
+                    }
                 };
                 Cell::from(span)
             })

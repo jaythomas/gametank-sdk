@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::tracker::{Beat, Pattern, empty_pattern};
 
-pub const NUM_INSTRUMENTS: usize = 11;
+pub const NUM_INSTRUMENTS: usize = 10;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InstrumentData {

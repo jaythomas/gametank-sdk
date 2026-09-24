@@ -19,6 +19,7 @@ pub const FX_ID_FADE_OUT: u8 = 6;
 pub const FX_ID_TREMBLE: u8 = 7;
 pub const MAX_FX_ID: u8 = FX_ID_TREMBLE;
 pub const MAX_INSTRUMENT_INDEX: u8 = 10;
+pub const NOISE_INSTRUMENT: u8 = MAX_INSTRUMENT_INDEX;
 pub const FX_TICKS_MAX: u8 = 0x3B;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -31,7 +32,7 @@ impl Beat {
     // Returns the active channel Fx command (if any) as (fx_id, x, y)
     pub fn fx(&self) -> Option<(u8, u8, Option<u8>)> {
         self.cmd_list.iter().find_map(|c| match c {
-            ChannelCmd::Instrument(x) => Some((FX_ID_INSTRUMENT, *x, None)),
+            ChannelCmd::Instrument(x, y) => Some((FX_ID_INSTRUMENT, *x, *y)),
             ChannelCmd::Arpeggio(x, y) => Some((FX_ID_ARPEGGIO, *x, *y)),
             ChannelCmd::PitchUp(x) => Some((FX_ID_PITCH_UP, *x, None)),
             ChannelCmd::PitchDown(x) => Some((FX_ID_PITCH_DOWN, *x, None)),
@@ -62,7 +63,7 @@ pub enum ChannelCmd {
     Note(String),
     NoteOff,
     Phase(u16),
-    Instrument(u8),
+    Instrument(u8, Option<u8>),
     Arpeggio(u8, Option<u8>),
     PitchUp(u8),
     PitchDown(u8),

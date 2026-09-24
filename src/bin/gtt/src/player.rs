@@ -10,7 +10,7 @@ use gte_w65c02s::W65C02S;
 use indexmap::IndexMap;
 
 use crate::file::NUM_INSTRUMENTS;
-use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
+use crate::tracker::{ChannelCmd, NOISE_INSTRUMENT, Pattern, SequencerCmd, empty_pattern};
 
 const FIRMWARE: &[u8; 4096] =
     include_bytes!("../../../../rom-template/gametank/audiofw/wavetable.bin");
@@ -19,9 +19,34 @@ const ROWS_PER_PATTERN: usize = 64;
 const AUDIO_CHANNELS: usize = 7;
 const CPU_FREQ: f64 = 3_579_545.0;
 
-const WAVETABLE: [u16; NUM_INSTRUMENTS] = [
-    0x0300, 0x0400, 0x0500, 0x0600, 0x0700, 0x0800, 0x0900, 0x0A00, 0x0B00, 0x0C00, 0x0D00,
+const INSTRUMENT_SLOT_COUNT: usize = 11;
+const NOISE_SENTINEL_MODE0: u16 = 0xfffe;
+const NOISE_SENTINEL_MODE1: u16 = 0xffff;
+
+const WAVETABLE: [u16; INSTRUMENT_SLOT_COUNT] = [
+    0x0300,
+    0x0400,
+    0x0500,
+    0x0600,
+    0x0700,
+    0x0800,
+    0x0900,
+    0x0A00,
+    0x0B00,
+    0x0C00,
+    NOISE_SENTINEL_MODE0,
 ];
+
+fn resolve_wavetable(idx: usize, noise_mode: Option<u8>) -> u16 {
+    if idx == NOISE_INSTRUMENT as usize {
+        match noise_mode {
+            Some(y) if y != 0 => NOISE_SENTINEL_MODE1,
+            _ => NOISE_SENTINEL_MODE0,
+        }
+    } else {
+        WAVETABLE[idx]
+    }
+}
 
 pub enum PlayerCmd {
     Play(usize, usize),
@@ -274,9 +299,9 @@ impl PlayerInner {
         }
     }
 
-    fn set_voice_waveptr(&mut self, ch: usize, waveform_idx: usize) {
+    fn set_voice_waveptr(&mut self, ch: usize, waveform_idx: usize, noise_mode: Option<u8>) {
         let base = 0x0041 + (ch * 7);
-        let ptr = WAVETABLE[waveform_idx];
+        let ptr = resolve_wavetable(waveform_idx, noise_mode);
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
             (*aram_ptr)[base + 4] = (ptr & 0xFF) as u8;
@@ -312,6 +337,7 @@ impl PlayerInner {
             let mut note_name: Option<String> = None;
             let mut base_freq: u16 = 0;
             let mut instrument = ch;
+            let mut instrument_mode: Option<u8> = None;
             for r in 0..row {
                 let beat = &self.patterns[pattern_idx][ch + 1][r];
                 for cmd in &beat.cmd_list {
@@ -332,8 +358,9 @@ impl PlayerInner {
                                 base_freq = freq_u32.min(0xFFFF) as u16;
                             }
                         }
-                        ChannelCmd::Instrument(idx) => {
+                        ChannelCmd::Instrument(idx, y) => {
                             instrument = *idx as usize;
+                            instrument_mode = *y;
                         }
                         _ => {}
                     }
@@ -344,7 +371,7 @@ impl PlayerInner {
             self.cur_note_name[ch] = note_name;
             self.base_freq[ch] = base_freq;
             self.current_instrument[ch] = instrument;
-            self.set_voice_waveptr(ch, instrument);
+            self.set_voice_waveptr(ch, instrument, instrument_mode);
             self.arp_active[ch] = false;
             self.pitch_active[ch] = false;
             self.fade_active[ch] = false;
@@ -448,7 +475,7 @@ impl PlayerInner {
                 _ => None,
             });
             let maybe_instrument = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::Instrument(idx) => Some(*idx as usize),
+                ChannelCmd::Instrument(idx, y) => Some((*idx as usize, *y)),
                 _ => None,
             });
             let maybe_pitch_up = beat.cmd_list.iter().find_map(|c| match c {
@@ -472,9 +499,9 @@ impl PlayerInner {
                 _ => None,
             });
 
-            if let Some(idx) = maybe_instrument {
+            if let Some((idx, y)) = maybe_instrument {
                 self.current_instrument[ch] = idx;
-                self.set_voice_waveptr(ch, idx);
+                self.set_voice_waveptr(ch, idx, y);
             }
 
             if let Some(v) = maybe_vol {

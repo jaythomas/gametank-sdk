@@ -1435,7 +1435,7 @@ impl Component for ControlDeck {
             }
         }
 
-        for vis in 0..5usize {
+        for vis in 0..4usize {
             let idx = vis + 6;
             let cell_area = right_inst_rows[vis];
             let is_row = sel_row == Row::Instrument(idx);
@@ -1485,9 +1485,9 @@ impl Component for ControlDeck {
         let tuning_focused = sel_row == Row::ActionTuning;
         const TUNING_BTN_W: u16 = 15;
         let tuning_btn_area = Rect {
-            x: right_inst_rows[5].x,
-            y: right_inst_rows[5].y,
-            width: TUNING_BTN_W.min(right_inst_rows[5].width),
+            x: right_inst_rows[4].x,
+            y: right_inst_rows[4].y,
+            width: TUNING_BTN_W.min(right_inst_rows[4].width),
             height: 1,
         };
         self.action_tuning_btn.focus.set(tuning_focused);

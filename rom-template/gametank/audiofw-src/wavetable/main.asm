@@ -9,8 +9,8 @@
 ; | $0041-$00FF  | $00C0 (192)  | Zero page (voices + vars) | VOICE_BASE = $0041; 7 voices × 7 bytes + temps |
 ; | $0100-$01FF  | $0100 (256)  | CPU stack                | hardware stack                                 |
 ; | $0200-$02FF  | $0100 (256)  | Volume table              | vol_table (half-amplitude sine)                |
-; | $0300-$0DFF  | $0B00 (2816) | Wavetables (11 × 256)     | placed by linker.ld's WAVE region              |
-; | $0E00-$0FF9  | ~$01FA (506) | Code / other data (ARAM)  | Remaining program space before the vector table |
+; | $0300-$0CFF  | $0A00 (2560) | Wavetables (10 × 256)     | placed by linker.ld's WAVE region              |
+; | $0D00-$0FF9  | ~$02FA (762) | Code / other data (ARAM)  | Remaining program space before the vector table |
 ; | $0FFA-$0FFF  | 6            | Vector table              | NMI/RESET/IRQ vectors                          |
 ;
 ; Addresses are little-endian, and ranges are inclusive.
@@ -25,6 +25,10 @@
 .set TEMP_SAMPLE, 0x0079  ; temporary storage for scaled sample
 .set TEMP_RESULT1, 0x007a ; temporary storage for first vol_table result
 .set TEMP_RESULT2, 0x007b ; temporary storage for second vol_table result
+
+; Noise instrument state
+.set LFSR_BASE, 0x007e       ; 7 voices x 2 bytes (low, high) of 15-bit LFSR state
+.set LFSR_SIZE, 2
 
 ; Macro to define offsets for a voice
 .macro DEFINE_VOICE voice_index
@@ -47,8 +51,41 @@ DEFINE_VOICE 4
 DEFINE_VOICE 5
 DEFINE_VOICE 6
 
-; Sample the next wavetable index and apply volume scaling to this tick's output sample
+; A voice's WAVEPTR is set to one of these two values (both share the same
+; high byte, `NOISE_SENTINEL_HI`, which real wavetable addresses never use)
+; to select the built-in Noise instrument instead of sampling a wavetable.
+; The low byte's bit 0 selects the noise "color" (see lfsr_clock below).
+.set NOISE_SENTINEL_HI, 0xff
+
+; Sample the next wavetable index (or clock the noise generator) and apply
+; volume scaling to this tick's output sample
 .macro PROCESS_VOICE_CORE n
+    ; A voice plays Noise instead of a wavetable when its WAVEPTR high byte
+    ; is the reserved NOISE_SENTINEL_HI value
+    lda VOICE_\n\()_WAVEPTR_H
+    bpl voice_\n\()_wavetable
+
+    ; --- Noise sampling path: clock this voice's LFSR on phase overflow,
+    ; i.e. at a rate set by the note's frequency, same as a wavetable voice's
+    ; table index advances - so note/frequency controls perceived pitch here too.
+    clc
+    lda VOICE_\n\()_PHASE_L
+    adc VOICE_\n\()_FREQ_L
+    sta VOICE_\n\()_PHASE_L
+    lda VOICE_\n\()_PHASE_H
+    adc VOICE_\n\()_FREQ_H
+    sta VOICE_\n\()_PHASE_H  ; carry here is this tick's phase-overflow, fresh off the ADC
+    ldx #(\n * LFSR_SIZE)   ; this voice's LFSR state offset
+    lda VOICE_\n\()_WAVEPTR_L
+    and #1                  ; A = noise mode (0/1), passed directly to lfsr_clock in A
+    bcc voice_\n\()_noise_sample
+    jsr lfsr_clock
+voice_\n\()_noise_sample:
+    lda LFSR_BASE, x        ; use the LFSR's low byte as this tick's sample
+    jmp voice_\n\()_scaled
+
+voice_\n\()_wavetable:
+    ; --- Wavetable sampling path ---
     ; Advance phase accumulator by FREQ (16-bit addition)
     clc
     lda VOICE_\n\()_PHASE_L
@@ -57,14 +94,13 @@ DEFINE_VOICE 6
     lda VOICE_\n\()_PHASE_H
     adc VOICE_\n\()_FREQ_H
     sta VOICE_\n\()_PHASE_H
-
-    ; Get wavetable sample using phase_high as index into per-voice wavetable
-    tay                    ; Y = phase high byte (table index)
+    tay                     ; Y = phase high byte (wavetable index)
     lda (VOICE_\n\()_WAVEPTR_L), y ; indirect indexed read from voice's wavetable
 
+voice_\n\()_scaled:
     ; Scale to 7-bit for volume scaling
     lsr a                  ; divide by 2
-    sta TEMP_RESULT1       ; save scaled wavetable sample (s)
+    sta TEMP_RESULT1       ; save scaled sample (s)
 
     ; index1 = s - volume
     sec
@@ -88,6 +124,56 @@ DEFINE_VOICE 6
     sec
     sbc TEMP_RESULT1        ; A = vol_table[s-v] - vol_table[s+v]
 .endm
+
+; Clock one voice's 15-bit Galois LFSR by one step, producing the next noise
+; sample in its low byte.
+; X = the voice's LFSR_BASE offset
+; A picks the tap position
+;   0 = taps bit 0 ^ bit 1,  period 32767 samples (adjacent bits: computed
+;       branch-free below via a shift + EOR, cheaper than mode 1's tap)
+;   1 = taps bit 0 ^ bit 6, period 93 samples
+lfsr_clock:
+    bne lfsr_tap_mode1
+    ; --- Mode 0: bit0 ^ bit1 are adjacent, so shifting the register right
+    ; by one lines bit1 up under bit0; EORing against the unshifted register
+    ; then shifting bit0 out into carry gives the feedback bit with no
+    ; branching at all.
+    lda LFSR_BASE, x
+    lsr a
+    eor LFSR_BASE, x
+    lsr a                    ; carry = feedback bit (bit 0 of the EOR result); A discarded
+    jmp lfsr_shift
+lfsr_tap_mode1:
+    ; --- Mode 1: bit0 ^ bit6 aren't adjacent, so there's no cheap shift
+    ; trick; fall back to an explicit tap-bit check.
+    lda LFSR_BASE, x
+    and #0x40               ; tap = bit 6 (short/metallic)
+    beq lfsr_feedback_bit0  ; tap bit was 0 -> feedback = bit 0 as-is
+    lda LFSR_BASE, x
+    and #0x01
+    eor #0x01               ; feedback = NOT bit 0
+    lsr a                    ; carry = feedback bit; A discarded
+    jmp lfsr_shift
+lfsr_feedback_bit0:
+    lda LFSR_BASE, x
+    and #0x01               ; feedback = bit 0
+    lsr a                    ; carry = feedback bit; A discarded
+
+    ; Shift the 15-bit register right by one, folding `feedback` (already
+    ; in carry) straight into the high byte's new top bit via ROR - no
+    ; scratch byte or lookup table needed. The high byte's old bit 0 then
+    ; rides carry into the low byte's new top bit the same way.
+lfsr_shift:
+    lda LFSR_BASE+1, x
+    ror a                     ; new top bit = feedback (from carry); carry = old high-byte bit 0
+    sta LFSR_BASE+1, x
+
+    lda LFSR_BASE, x
+    ror a                     ; carry (old high-byte bit 0) becomes the new bit 7
+    sta LFSR_BASE, x
+    rts
+
+.section .text
 
 audio_irq:
     PROCESS_VOICE_CORE 0
@@ -139,7 +225,40 @@ _start:
     ; Initialize stack pointer
     ldx #0xff
     txs
-    
+
+    ; Seed every voice's noise LFSR to a fixed nonzero value. Never
+    ; reseeded after this (see lfsr_clock) so it free-runs continuously;
+    ; each voice gets a different seed so multiple noise voices playing
+    ; the same note don't produce identical, reinforcing noise.
+    lda #0xe1
+    sta LFSR_BASE+0
+    lda #0x2c
+    sta LFSR_BASE+1
+    lda #0x3d
+    sta LFSR_BASE+2
+    lda #0x15
+    sta LFSR_BASE+3
+    lda #0x7a
+    sta LFSR_BASE+4
+    lda #0x6e
+    sta LFSR_BASE+5
+    lda #0xc4
+    sta LFSR_BASE+6
+    lda #0x09
+    sta LFSR_BASE+7
+    lda #0x29
+    sta LFSR_BASE+8
+    lda #0x41
+    sta LFSR_BASE+9
+    lda #0x85
+    sta LFSR_BASE+10
+    lda #0x33
+    sta LFSR_BASE+11
+    lda #0x5b
+    sta LFSR_BASE+12
+    lda #0x1a
+    sta LFSR_BASE+13
+
     ; Enable interrupts
     cli
     

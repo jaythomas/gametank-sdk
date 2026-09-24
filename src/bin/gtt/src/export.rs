@@ -105,9 +105,10 @@ fn bake_pattern(
                     ChannelCmd::NoteOff => {
                         has_note_off = true;
                     }
-                    ChannelCmd::Instrument(idx) => {
+                    ChannelCmd::Instrument(idx, y) => {
                         fx_id = FX_ID_INSTRUMENT;
                         fx_x = *idx;
+                        fx_y = y.unwrap_or(0);
                     }
                     ChannelCmd::Arpeggio(x, y) => {
                         fx_id = FX_ID_ARPEGGIO;

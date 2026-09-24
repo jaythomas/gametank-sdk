@@ -93,7 +93,7 @@ See the [Tuning editor](#tuning-editor) for how to update these mappings.
 | ID | Label       | Parameters                                               | Description                                    |
 | -- | -----       | ----------                                               | -----------                                    |
 | 0  | (no effect) |                                                          |                                                |
-| 1  | Instrument  | x (0-A) = instrument index                               | Switch which instrument this channel is using. |
+| 1  | Instrument  | x (0-A) = instrument index, y (0-1) = noise channel mode | Switch which instrument this channel is using. Instrument `A` is the virtual noise channel. Similar to the noise "percussion" of the NES, mode 0 has a slow hiss and mode 1 has more crash. |
 | 2  | Arpeggio    | x (0-F) = how many steps up to the second note,<br>y (0-F) = optional, steps up for a third note. | The arpeggiation steps to its next note once per tick, and FxSpeed sets how many ticks occur per beat. So an FxSpeed of `05` yields 3 ticks/notes a beat. |
 | 3  | PitchUp     | x (00-FF) = how many steps up to slide to                | Portamento that increments at a rate of FxSpeed. |
 | 4  | PitchDown   | x (00-FF) = how many steps down to slide to              | Portamento that decrements at a rate of FxSpeed. |

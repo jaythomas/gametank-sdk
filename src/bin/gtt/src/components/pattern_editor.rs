@@ -132,7 +132,7 @@ fn fx_x_max(fx_id: u8) -> u8 {
 }
 
 fn fx_digit_cap(fx_id: u8) -> u8 {
-    if fx_id == FX_ID_ARPEGGIO { 3 } else { 2 }
+    if fx_id == FX_ID_ARPEGGIO || fx_id == FX_ID_INSTRUMENT { 3 } else { 2 }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -314,7 +314,7 @@ impl CellDisplay {
             },
             CellDisplay::Fx(fx) => match fx {
                 None => "---".to_string(),
-                Some((id, x, y)) if *id == FX_ID_ARPEGGIO => format!(
+                Some((id, x, y)) if *id == FX_ID_ARPEGGIO || *id == FX_ID_INSTRUMENT => format!(
                     "{:01X}{:01X}{}",
                     id,
                     x,
@@ -667,9 +667,9 @@ impl Component for PatternEditor {
                             fx_id = digit;
                             fx_x = 0;
                             fx_y = None;
-                        } else if fx_id == FX_ID_ARPEGGIO {
+                        } else if fx_id == FX_ID_ARPEGGIO || fx_id == FX_ID_INSTRUMENT {
                             if digits_typed == 1 {
-                                fx_x = digit;
+                                fx_x = digit.min(fx_x_max(fx_id));
                             } else {
                                 fx_y = Some(digit);
                             }
@@ -684,7 +684,7 @@ impl Component for PatternEditor {
                         beat.cmd_list.retain(|c| {
                             !matches!(
                                 c,
-                                ChannelCmd::Instrument(_)
+                                ChannelCmd::Instrument(_, _)
                                     | ChannelCmd::Arpeggio(_, _)
                                     | ChannelCmd::PitchUp(_)
                                     | ChannelCmd::PitchDown(_)
@@ -694,7 +694,9 @@ impl Component for PatternEditor {
                             )
                         });
                         match fx_id {
-                            FX_ID_INSTRUMENT => beat.cmd_list.push(ChannelCmd::Instrument(fx_x)),
+                            FX_ID_INSTRUMENT => {
+                                beat.cmd_list.push(ChannelCmd::Instrument(fx_x, fx_y))
+                            }
                             FX_ID_ARPEGGIO => beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y)),
                             FX_ID_PITCH_UP => beat.cmd_list.push(ChannelCmd::PitchUp(fx_x)),
                             FX_ID_PITCH_DOWN => beat.cmd_list.push(ChannelCmd::PitchDown(fx_x)),
@@ -743,7 +745,7 @@ impl Component for PatternEditor {
                             beat.cmd_list.retain(|c| {
                                 !matches!(
                                     c,
-                                    ChannelCmd::Instrument(_)
+                                    ChannelCmd::Instrument(_, _)
                                         | ChannelCmd::Arpeggio(_, _)
                                         | ChannelCmd::PitchUp(_)
                                         | ChannelCmd::PitchDown(_)
@@ -754,7 +756,7 @@ impl Component for PatternEditor {
                             });
                             match fx_id {
                                 FX_ID_INSTRUMENT => {
-                                    beat.cmd_list.push(ChannelCmd::Instrument(fx_x))
+                                    beat.cmd_list.push(ChannelCmd::Instrument(fx_x, fx_y))
                                 }
                                 FX_ID_ARPEGGIO => {
                                     beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y))

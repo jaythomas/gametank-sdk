@@ -86,14 +86,14 @@ See the [Tuning editor](#tuning-editor) for how to update these mappings.
 
 **`/~** sets Note OFF. While an empty beat carries a note, an explicit Note OFF effectively ends the note by temporarily muting the channel.
 
-**v** represents volume. Entered as a two-digit hexadecimal value from `00` to `3F` (0-63 decimal). Type 0-9/A-F to set digits or `-`/`=` to decrement/increment. The last set volume carries to the next note, even if a note OFF is set along the way.
+**v** represents volume. Entered as a single hexadecimal digit from `0` to `F`, where `0` is silence and `F` is full volume. The levels are spaced 2dB apart, so each step is an equal change by ear. Type 0-9/A-F to set the level or `-`/`=` to decrement/increment. The last set volume carries to the next note, even if a note OFF is set along the way.
 
 **Fx** lets you apply effects per channel. Effects apply at the start of the beat before the note is processed.
 
 | ID | Label       | Parameters                                               | Description                                    |
 | -- | -----       | ----------                                               | -----------                                    |
 | 0  | (no effect) |                                                          |                                                |
-| 1  | Instrument  | x (0-A) = instrument index, y (0-1) = noise channel mode | Switch which instrument this channel is using. Instrument `A` is the virtual noise channel. Similar to the noise "percussion" of the NES, mode 0 has a slow hiss and mode 1 has more crash. |
+| 1  | Instrument  | x (0-7) = instrument index | Switch which instrument this channel is using. |
 | 2  | Arpeggio    | x (0-F) = how many steps up to the second note,<br>y (0-F) = optional, steps up for a third note. | The arpeggiation steps to its next note once per tick, and FxSpeed sets how many ticks occur per beat. So an FxSpeed of `05` yields 3 ticks/notes a beat. |
 | 3  | PitchUp     | x (00-FF) = how many steps up to slide to                | Portamento that increments at a rate of FxSpeed. |
 | 4  | PitchDown   | x (00-FF) = how many steps down to slide to              | Portamento that decrements at a rate of FxSpeed. |
@@ -113,7 +113,7 @@ The control deck allows you to edit global track parameters, pattern-level param
 
 **FxSpeed** is the starting effects speed for the track (see **SEQ** commands for more details).
 
-**Instruments** - there are 11 total instruments, which can be swapped out on any beat on any channel to provide a lot of versatility. The 11 instruments can be renamed from here, and their waveforms opened in the instrument editor from the `[⚙]` buttons.
+**Instruments** - there are 8 total instruments, which can be swapped out on any beat on any channel to provide a lot of versatility. The 8 instruments can be renamed from here, and their waveforms opened in the instrument editor from the `[⚙]` buttons. In a new track, instrument 6 (the one channel 6 plays by default) starts out as white noise so there is a percussion channel ready to go; the rest start as square waves.
 
 **Tuning editor** opens the [tuning editor](#tuning-editor) for key assignment.
 
@@ -230,7 +230,7 @@ The exported `<name>-export/<name>.bin` is made of three parts:
 [0] beats: u8 (row count for this pattern)
 per channel, each array sized to `beats` bytes:
   freq_lo[beats], freq_hi[beats]   16-bit phase increment; 0x0000 holds the previous note
-  vol[beats]                       0-63, or 0xFF to hold the previous volume
+  vol[beats]                       0-15, or 0xFF to hold the previous volume
   fx_id[beats]                     equal to the channel effect ID (see channel FX definitions above); 0 = no effect
   fx_x[beats], fx_y[beats]         raw effect parameters (scale-degree offsets for Arpeggio/PitchUp/PitchDown)
   fx_freq_x_lo/hi[beats]           baked target frequency for fx_x (Arpeggio's +x note, or PitchUp/PitchDown's slide target)

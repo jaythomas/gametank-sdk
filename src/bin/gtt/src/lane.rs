@@ -49,9 +49,9 @@ impl Lane {
 
     pub fn vol(ch: u8) -> Self {
         Self {
-            title: " v  ".to_string(),
+            title: " v ".to_string(),
             padding: (1, 1),
-            width: 4,
+            width: 3,
             kind: LaneKind::Vol,
             ch: Some(ch as usize),
         }

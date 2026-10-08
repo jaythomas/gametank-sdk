@@ -169,7 +169,7 @@ pub fn init_demo() -> DemoSequencer {
     use gametank::audio::{voices, WAVETABLE};
 
     let v = voices();
-    for voice in v.iter_mut() {
+    for voice in v.iter() {
         voice.set_wavetable(WAVETABLE[0]);
         voice.set_volume(0);
     }

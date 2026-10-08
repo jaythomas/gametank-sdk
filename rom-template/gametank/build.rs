@@ -8,7 +8,7 @@ fn main() {
     if env::var("CARGO_FEATURE_AUDIO_WAVETABLE").is_ok() {
         assemble_wavetable_firmware(
             "wavetable",
-            &["main", "wave", "vol"],
+            &["main", "wave", "gain"],
             &manifest,
             &out_dir,
             &fw_dir,

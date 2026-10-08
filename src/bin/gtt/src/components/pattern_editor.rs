@@ -21,7 +21,7 @@ use crate::{
     tracker::{
         Beat, ChannelCmd, FX_ID_ARPEGGIO, FX_ID_FADE_IN, FX_ID_FADE_OUT, FX_ID_INSTRUMENT,
         FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, FX_ID_TREMBLE, FX_TICKS_MAX, MAX_FX_ID,
-        MAX_INSTRUMENT_INDEX, Pattern, SequencerCmd,
+        MAX_INSTRUMENT_INDEX, MAX_VOLUME, Pattern, SequencerCmd,
     },
 };
 
@@ -132,7 +132,7 @@ fn fx_x_max(fx_id: u8) -> u8 {
 }
 
 fn fx_digit_cap(fx_id: u8) -> u8 {
-    if fx_id == FX_ID_ARPEGGIO || fx_id == FX_ID_INSTRUMENT { 3 } else { 2 }
+    if fx_id == FX_ID_ARPEGGIO { 3 } else { 2 }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -152,7 +152,6 @@ pub struct PatternEditor {
     view_layout: ViewLayout,
     lanes: Vec<Lane>,
     transpose: i32,
-    vol_edit: Option<(u8, u8)>,
     fx_edit: Option<((u8, u8), u8)>,
     seq_choice: ChoiceState<usize>,
     seq_choice_cell: Option<(u8, u8)>,
@@ -195,7 +194,6 @@ impl PatternEditor {
             transpose: 0,
             sel_x: 2,
             sel_y: 0,
-            vol_edit: None,
             fx_edit: None,
             seq_choice: ChoiceState::new(),
             seq_choice_cell: None,
@@ -309,8 +307,8 @@ impl CellDisplay {
                 NoteCell::On(s) => format!("{:<3}", s),
             },
             CellDisplay::Vol(maybe_set) => match maybe_set {
-                Some(v) => format!("{:02X}", v),
-                None => "--".to_string(),
+                Some(v) => format!("{:X}", v),
+                None => "-".to_string(),
             },
             CellDisplay::Fx(fx) => match fx {
                 None => "---".to_string(),
@@ -424,14 +422,12 @@ impl Component for PatternEditor {
             match code {
                 KeyCode::Up => {
                     self.sel_y = if self.sel_y == 0 { self.beats.saturating_sub(1) } else { self.sel_y - 1 };
-                    self.vol_edit = None;
                     self.fx_edit = None;
                     self.seq_edit = None;
                     self.seq_choice_cell = None;
                 }
                 KeyCode::Down => {
                     self.sel_y = if self.sel_y + 1 >= self.beats { 0 } else { self.sel_y + 1 };
-                    self.vol_edit = None;
                     self.fx_edit = None;
                     self.seq_edit = None;
                     self.seq_choice_cell = None;
@@ -442,14 +438,12 @@ impl Component for PatternEditor {
                     } else {
                         self.sel_x - 1
                     };
-                    self.vol_edit = None;
                     self.fx_edit = None;
                     self.seq_edit = None;
                     self.seq_choice_cell = None;
                 }
                 KeyCode::Right => {
                     self.sel_x = (self.sel_x + 1) % self.lanes.len() as u8;
-                    self.vol_edit = None;
                     self.fx_edit = None;
                     self.seq_edit = None;
                     self.seq_choice_cell = None;
@@ -457,7 +451,6 @@ impl Component for PatternEditor {
                 KeyCode::PageUp => {
                     let step = (self.view_layout.page_h / 2).max(1) as u8;
                     self.sel_y = self.sel_y.saturating_sub(step);
-                    self.vol_edit = None;
                     self.fx_edit = None;
                     self.seq_edit = None;
                     self.seq_choice_cell = None;
@@ -465,7 +458,6 @@ impl Component for PatternEditor {
                 KeyCode::PageDown => {
                     let step = (self.view_layout.page_h / 2).max(1) as u8;
                     self.sel_y = (self.sel_y + step).min(self.beats.saturating_sub(1));
-                    self.vol_edit = None;
                     self.fx_edit = None;
                     self.seq_edit = None;
                     self.seq_choice_cell = None;
@@ -544,7 +536,6 @@ impl Component for PatternEditor {
         }
 
         if let (LaneKind::Vol, Some(channel)) = (lane_kind, ch) {
-            let cell = (self.sel_x, self.sel_y);
             let row = self.sel_y as usize;
             for event in &events {
                 match event {
@@ -556,22 +547,7 @@ impl Component for PatternEditor {
                     }) if matches!(*modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
                         && c.is_ascii_hexdigit() =>
                     {
-                        let digit = c.to_digit(16).unwrap() as u8;
-                        let prev = if self.vol_edit == Some(cell) {
-                            let pattern = file.current_pattern(self.pattern_idx);
-                            pattern[channel + 1][row]
-                                .cmd_list
-                                .iter()
-                                .find_map(|c| match c {
-                                    ChannelCmd::Volume(v) => Some(*v),
-                                    _ => None,
-                                })
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        let value = ((prev % 16) * 16 + digit).min(0x3F);
-                        self.vol_edit = Some(cell);
+                        let value = c.to_digit(16).unwrap() as u8;
 
                         let pattern = file.current_pattern_mut(self.pattern_idx);
                         let beat = &mut pattern[channel + 1][row];
@@ -588,7 +564,6 @@ impl Component for PatternEditor {
                         && (*code == keybinds::VOL_INCREMENT
                             || *code == keybinds::VOL_DECREMENT) =>
                     {
-                        self.vol_edit = None;
                         let pattern = file.current_pattern(self.pattern_idx);
                         let current =
                             pattern[channel + 1][row]
@@ -602,7 +577,7 @@ impl Component for PatternEditor {
                         let next_value = if *code == keybinds::VOL_INCREMENT {
                             match current {
                                 None => Some(0),
-                                Some(v) if v < 0x3F => Some(v + 1),
+                                Some(v) if v < MAX_VOLUME => Some(v + 1),
                                 Some(_) => None,
                             }
                         } else {
@@ -625,7 +600,6 @@ impl Component for PatternEditor {
                         kind: KeyEventKind::Press,
                         ..
                     }) if keybinds::CLEAR.contains(code) => {
-                        self.vol_edit = None;
                         let pattern = file.current_pattern_mut(self.pattern_idx);
                         let beat = &mut pattern[channel + 1][row];
                         beat.cmd_list
@@ -667,7 +641,9 @@ impl Component for PatternEditor {
                             fx_id = digit;
                             fx_x = 0;
                             fx_y = None;
-                        } else if fx_id == FX_ID_ARPEGGIO || fx_id == FX_ID_INSTRUMENT {
+                        } else if fx_id == FX_ID_INSTRUMENT {
+                            fx_x = digit.min(fx_x_max(fx_id));
+                        } else if fx_id == FX_ID_ARPEGGIO {
                             if digits_typed == 1 {
                                 fx_x = digit.min(fx_x_max(fx_id));
                             } else {
@@ -684,7 +660,7 @@ impl Component for PatternEditor {
                         beat.cmd_list.retain(|c| {
                             !matches!(
                                 c,
-                                ChannelCmd::Instrument(_, _)
+                                ChannelCmd::Instrument(_)
                                     | ChannelCmd::Arpeggio(_, _)
                                     | ChannelCmd::PitchUp(_)
                                     | ChannelCmd::PitchDown(_)
@@ -695,7 +671,7 @@ impl Component for PatternEditor {
                         });
                         match fx_id {
                             FX_ID_INSTRUMENT => {
-                                beat.cmd_list.push(ChannelCmd::Instrument(fx_x, fx_y))
+                                beat.cmd_list.push(ChannelCmd::Instrument(fx_x))
                             }
                             FX_ID_ARPEGGIO => beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y)),
                             FX_ID_PITCH_UP => beat.cmd_list.push(ChannelCmd::PitchUp(fx_x)),
@@ -745,7 +721,7 @@ impl Component for PatternEditor {
                             beat.cmd_list.retain(|c| {
                                 !matches!(
                                     c,
-                                    ChannelCmd::Instrument(_, _)
+                                    ChannelCmd::Instrument(_)
                                         | ChannelCmd::Arpeggio(_, _)
                                         | ChannelCmd::PitchUp(_)
                                         | ChannelCmd::PitchDown(_)
@@ -756,7 +732,7 @@ impl Component for PatternEditor {
                             });
                             match fx_id {
                                 FX_ID_INSTRUMENT => {
-                                    beat.cmd_list.push(ChannelCmd::Instrument(fx_x, fx_y))
+                                    beat.cmd_list.push(ChannelCmd::Instrument(fx_x))
                                 }
                                 FX_ID_ARPEGGIO => {
                                     beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y))

@@ -129,7 +129,7 @@
 //! // Play notes using the wavetable synth
 //! let v = voices();
 //! v[0].set_note(MidiNote::C4);
-//! v[0].set_volume(63);
+//! v[0].set_volume(15);
 //! v[0].set_wavetable(WAVETABLE[0]);
 //! ```
 //!

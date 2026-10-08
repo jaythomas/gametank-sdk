@@ -5,7 +5,7 @@ use crate::file::{NUM_INSTRUMENTS, TrackerFile};
 use crate::sample_rate::{SAMPLE_RATE_REG, sample_rate_reg_to_hz};
 use crate::tracker::{
     ChannelCmd, FX_ID_ARPEGGIO, FX_ID_FADE_IN, FX_ID_FADE_OUT, FX_ID_INSTRUMENT, FX_ID_NONE,
-    FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, FX_ID_TREMBLE, SequencerCmd,
+    FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, FX_ID_TREMBLE, MAX_VOLUME, SequencerCmd,
 };
 
 const CHANNELS: usize = 7;
@@ -100,15 +100,15 @@ fn bake_pattern(
                         cur_note_name = None;
                     }
                     ChannelCmd::Volume(v) => {
-                        explicit_vol = Some((*v).min(63));
+                        explicit_vol = Some((*v).min(MAX_VOLUME));
                     }
                     ChannelCmd::NoteOff => {
                         has_note_off = true;
                     }
-                    ChannelCmd::Instrument(idx, y) => {
+                    ChannelCmd::Instrument(idx) => {
                         fx_id = FX_ID_INSTRUMENT;
                         fx_x = *idx;
-                        fx_y = y.unwrap_or(0);
+                        fx_y = 0;
                     }
                     ChannelCmd::Arpeggio(x, y) => {
                         fx_id = FX_ID_ARPEGGIO;

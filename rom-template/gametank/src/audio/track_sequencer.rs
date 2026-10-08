@@ -1,9 +1,7 @@
-use super::wavetable::{
-    NOISE_INSTRUMENT, NOISE_SENTINEL_MODE0, NOISE_SENTINEL_MODE1, VOICE_COUNT, WAVETABLE, voices,
-};
+use super::wavetable::{VOICE_COUNT, WAVETABLE, WAVETABLE_COUNT, voices};
 use crate::console::Console;
 
-const SAMPLE_RATE_REG: u8 = 0xD7;
+const SAMPLE_RATE_REG: u8 = 0xA9;
 
 macro_rules! instrument_table {
     ($n:literal) => {
@@ -16,12 +14,12 @@ macro_rules! instrument_table {
     };
 }
 
-// The 10 fixed instrument slots don't fit in FIXED_FLASH
+// The 8 fixed instrument slots don't fit in FIXED_FLASH
 // alongside everything else, so they're placed in bank 125.
 const INSTRUMENT_BANK: u8 = 125;
 
 #[unsafe(link_section = ".rodata.bank125")]
-static INSTRUMENT_TABLES: [[u8; 256]; 10] = [
+static INSTRUMENT_TABLES: [[u8; 256]; WAVETABLE_COUNT] = [
     instrument_table!(0),
     instrument_table!(1),
     instrument_table!(2),
@@ -30,8 +28,6 @@ static INSTRUMENT_TABLES: [[u8; 256]; 10] = [
     instrument_table!(5),
     instrument_table!(6),
     instrument_table!(7),
-    instrument_table!(8),
-    instrument_table!(9),
 ];
 
 // Number of parallel per-beat arrays packed into each channel's slice of a
@@ -433,15 +429,7 @@ impl TrackSequencer {
                 }
                 any_active = true;
             } else if fx_id == FX_ID_INSTRUMENT {
-                v[ch].set_wavetable(if fx_x as usize == NOISE_INSTRUMENT {
-                    if fx_y == 0 {
-                        NOISE_SENTINEL_MODE0
-                    } else {
-                        NOISE_SENTINEL_MODE1
-                    }
-                } else {
-                    WAVETABLE[fx_x as usize]
-                });
+                v[ch].set_wavetable(WAVETABLE[fx_x as usize]);
                 unsafe {
                     ACTIVE_FX[ch] = ACTIVE_FX_NONE;
                     if new_note || had_freq_fx {

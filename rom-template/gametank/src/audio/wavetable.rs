@@ -2,8 +2,8 @@
 //!
 //! This firmware provides 7 independent voices, each with:
 //! - **Note/Frequency** - MIDI notes or raw frequency values
-//! - **Volume** - 0 (silent) to 63 (max)
-//! - **Wavetable** - One of 10 waveform slots, plus a built-in Noise instrument
+//! - **Volume** - 0 (silent) to 7 (max), in 3 dB steps
+//! - **Wavetable** - One of 8 waveform slots
 //!
 //! ## Quick Start
 //!
@@ -14,71 +14,72 @@
 //!
 //! // Play middle C at full volume with the first wavetable
 //! v[0].set_note(MidiNote::C4);
-//! v[0].set_volume(63);
+//! v[0].set_volume(MAX_VOLUME);
 //! v[0].set_wavetable(WAVETABLE[0]);
 //!
 //! // Play a chord
-//! v[1].set_note(MidiNote::E4);  v[1].set_volume(50);
-//! v[2].set_note(MidiNote::G4);  v[2].set_volume(50);
+//! v[1].set_note(MidiNote::E4);  v[1].set_volume(5);
+//! v[2].set_note(MidiNote::G4);  v[2].set_volume(5);
 //!
 //! // Stop a voice
 //! v[0].mute();
 //! ```
 //!
+//! ## Volume
+//!
+//! Levels run 0 (silent) to [`MAX_VOLUME`] (15) and are spaced 2 dB apart, so
+//! each step is a roughly equal-sounding jump rather than an equal numeric one.
+//! Gains are normalized so that four voices at [`MAX_VOLUME`] reach full scale;
+//! pushing more than that into the mix saturates rather than wrapping, so it
+//! distorts gracefully instead of inverting the waveform.
+//!
 //! ## Wavetables
 //!
-//! The firmware has 10 wavetable slots. Use [`WAVETABLE`] to get slot addresses:
+//! The firmware has 8 wavetable slots. Use [`WAVETABLE`] to get slot addresses:
 //!
 //! ```rust,ignore
 //! v[0].set_wavetable(WAVETABLE[0]);  // First waveform
 //! v[1].set_wavetable(WAVETABLE[1]);  // Second waveform
 //! ```
 //!
-//! Use the NOISE_* constants to access the virtual noise instruments:
-//! ```rust,ignore
-//! v[2].set_wavetable(NOISE_SENTINEL_MODE0);
-//! v[2].set_wavetable(NOISE_SENTINEL_MODE1);
-//! ```
 //!
 //! You can load custom waveforms (256 bytes each) into audio RAM:
 //!
 //! ```rust,ignore
-//! // Wavetable 0 is at $3400, wavetable 1 at $3500, etc.
+//! // Wavetable 0 is at $3600, wavetable 1 at $3700, etc.
 //! let my_wave: [u8; 256] = generate_sine();
-//! console.audio[0x400..0x500].copy_from_slice(&my_wave);
+//! console.audio[0x600..0x700].copy_from_slice(&my_wave);
 //! ```
 
 use crate::audio::pitch_table::{MidiNote, midi_inc};
 
-/// Base address for voice registers (CPU-side address, ACP RAM at 0x3000)
-pub const VOICE_BASE: usize = 0x3041;
-/// Number of bytes per voice
-pub const VOICE_SIZE: usize = 7;
 /// Number of voices
 pub const VOICE_COUNT: usize = 7;
 
+/// CPU-side address of ACP RAM.
+const ACP_RAM: usize = 0x3000;
+/// ACP address of the first voice's phase accumulator (zero page, 2 bytes per voice).
+const PHASE_BASE: usize = 0x0041;
+/// ACP address of the first voice's code block. Voice parameters are not data
+/// but the operands of instructions in each voice's code block, which is how
+/// the firmware reads them without any indexing or pointer loads.
+const VOICE_CODE_BASE: usize = 0x0E03;
+/// Distance between consecutive voice code blocks.
+const VOICE_BLOCK_SIZE: usize = 31;
+const FREQ_LO_OFFSET: usize = 4;
+const FREQ_HI_OFFSET: usize = 10;
+const WAVE_OFFSET: usize = 15;
+const GAIN_OFFSET: usize = 21;
+
 /// Base address for wavetables in ACP RAM (CPU-side)
-pub const WAVETABLE_BASE: usize = 0x3300;
+pub const WAVETABLE_BASE: usize = 0x3600;
 /// Size of each wavetable in bytes
 pub const WAVETABLE_SIZE: usize = 256;
-/// Number of entries in [`WAVETABLE`]: 10 real wavetable slots plus the
-/// reserved Noise sentinel slot at [`NOISE_INSTRUMENT`].
-pub const WAVETABLE_COUNT: usize = 11;
+/// Number of entries in [`WAVETABLE`].
+pub const WAVETABLE_COUNT: usize = 8;
 
-/// Reserved instrument slot for Noise Mode0/Mode1
-pub const NOISE_INSTRUMENT: usize = 10;
-
-/// Hiss mode
-pub const NOISE_SENTINEL_MODE0: u16 = 0xfffe;
-/// Crash mode
-pub const NOISE_SENTINEL_MODE1: u16 = 0xffff;
-
-/// Wavetable slot addresses (CPU-side). The last entry is the Noise
-/// instrument's sentinel value rather than a real address.
+/// Wavetable slot addresses (ACP-side).
 pub const WAVETABLE: [u16; WAVETABLE_COUNT] = [
-    0x0300,
-    0x0400,
-    0x0500,
     0x0600,
     0x0700,
     0x0800,
@@ -86,101 +87,151 @@ pub const WAVETABLE: [u16; WAVETABLE_COUNT] = [
     0x0A00,
     0x0B00,
     0x0C00,
-    NOISE_SENTINEL_MODE0,
+    0x0D00,
 ];
 
-/// A single synthesizer voice.
+/// Number of distinct volume levels.
+pub const VOLUME_LEVELS: usize = 16;
+
+/// Loudest volume level.
+pub const MAX_VOLUME: u8 = (VOLUME_LEVELS - 1) as u8;
+
+/// ACP address of the first gain table.
+const GAIN_BASE: u16 = 0x0200;
+/// Gain tables are interleaved four to a block of this many bytes; a level's
+/// pointer is its block's address plus its position (0-3) within the block.
+const GAIN_BLOCK_SIZE: u16 = 256;
+const GAIN_TABLES_PER_BLOCK: u16 = 4;
+
+/// Handle to a single synthesizer voice.
 ///
-/// This struct is laid out to match the ACP firmware's memory layout exactly.
-/// All fields are little-endian as expected by the 6502.
-#[repr(C, packed)]
+/// A voice is only an index; its parameters live in audio RAM as operands of
+/// the firmware's instructions. Handles are cheap to copy and all methods take
+/// `&self`.
+#[derive(Clone, Copy)]
 pub struct Voice {
-    /// Phase accumulator (16.8 fixed point, high byte indexes wavetable)
-    phase: u16,
-    /// Frequency increment added to phase each sample
-    frequency: u16,
-    /// Pointer to 256-byte wavetable in ACP RAM
-    wavetable: u16,
-    /// Volume level (0 = silence, 63 = max)
-    volume: u8,
+    index: u8,
+}
+
+#[inline]
+fn poke(acp_addr: usize, value: u8) {
+    unsafe { core::ptr::write_volatile((ACP_RAM + acp_addr) as *mut u8, value) }
+}
+
+#[inline]
+fn peek(acp_addr: usize) -> u8 {
+    unsafe { core::ptr::read_volatile((ACP_RAM + acp_addr) as *const u8) }
+}
+
+#[inline]
+fn poke16(acp_addr: usize, value: u16) {
+    poke(acp_addr, value as u8);
+    poke(acp_addr + 1, (value >> 8) as u8);
 }
 
 impl Voice {
+    #[inline]
+    fn code(&self, offset: usize) -> usize {
+        VOICE_CODE_BASE + self.index as usize * VOICE_BLOCK_SIZE + offset
+    }
+
     /// Set the voice frequency from a MIDI note number.
     #[inline]
-    pub fn set_note(&mut self, note: MidiNote) {
-        self.frequency = midi_inc(note);
+    pub fn set_note(&self, note: MidiNote) {
+        self.set_frequency(midi_inc(note));
     }
 
     /// Set the voice frequency directly as a 16-bit increment value.
     ///
     /// Use `pitch_table::midi_inc()` to convert from MIDI notes,
     /// or calculate directly: `inc = (freq_hz * 65536) / SAMPLE_RATE`
+    ///
+    /// The two bytes are written separately, so a sample landing between them
+    /// plays one sample at a slightly wrong pitch.
     #[inline]
-    pub fn set_frequency(&mut self, freq_inc: u16) {
-        self.frequency = freq_inc;
+    pub fn set_frequency(&self, freq_inc: u16) {
+        poke(self.code(FREQ_LO_OFFSET), freq_inc as u8);
+        poke(self.code(FREQ_HI_OFFSET), (freq_inc >> 8) as u8);
     }
 
-    /// Set the volume level (0 = silence, 63 = maximum).
+    /// Set the volume level (0 = silence, [`MAX_VOLUME`] = loudest).
     ///
-    /// Values above 63 may cause clipping/distortion.
+    /// Levels are 2 dB apart. Values above [`MAX_VOLUME`] are clamped.
+    ///
+    /// The firmware tolerates this landing mid-sample: gain table pointers
+    /// differ only in a low byte of 0-3 and a high byte of 2-5, so a partially
+    /// written pointer still addresses a real table and the worst case is one
+    /// sample at a different volume.
     #[inline]
-    pub fn set_volume(&mut self, volume: u8) {
-        self.volume = volume;
+    pub fn set_volume(&self, volume: u8) {
+        let level = if volume > MAX_VOLUME { MAX_VOLUME } else { volume };
+        let level = level as u16;
+        let gain = GAIN_BASE
+            + (level / GAIN_TABLES_PER_BLOCK) * GAIN_BLOCK_SIZE
+            + level % GAIN_TABLES_PER_BLOCK;
+        poke16(self.code(GAIN_OFFSET), gain);
     }
 
     /// Set which wavetable this voice uses.
     ///
-    /// Pass the ACP-side address (e.g., `WAVETABLE[0]` = 0x0400).
+    /// Pass the ACP-side address (e.g., `WAVETABLE[0]` = 0x0600). Wavetables
+    /// must be 256-byte aligned, which every [`WAVETABLE`] slot is.
     #[inline]
-    pub fn set_wavetable(&mut self, wavetable_addr: u16) {
-        self.wavetable = wavetable_addr;
+    pub fn set_wavetable(&self, wavetable_addr: u16) {
+        poke16(self.code(WAVE_OFFSET), wavetable_addr);
     }
 
     /// Silence this voice immediately.
     #[inline]
-    pub fn mute(&mut self) {
-        self.volume = 0;
+    pub fn mute(&self) {
+        self.set_volume(0);
     }
 
     /// Reset the phase accumulator to zero (useful for hard sync effects).
     #[inline]
-    pub fn reset_phase(&mut self) {
-        self.phase = 0;
+    pub fn reset_phase(&self) {
+        let phase = PHASE_BASE + self.index as usize * 2;
+        poke(phase, 0);
+        poke(phase + 1, 0);
+    }
+
+    /// Get the wavetable address this voice is currently using.
+    #[inline]
+    pub fn get_wavetable(&self) -> u16 {
+        let addr = self.code(WAVE_OFFSET);
+        peek(addr) as u16 | (peek(addr + 1) as u16) << 8
     }
 
     /// Get the current volume level.
     #[inline]
     pub fn get_volume(&self) -> u8 {
-        self.volume
+        let addr = self.code(GAIN_OFFSET);
+        let gain = peek(addr) as u16 | (peek(addr + 1) as u16) << 8;
+        let offset = gain - GAIN_BASE;
+        ((offset / GAIN_BLOCK_SIZE) * GAIN_TABLES_PER_BLOCK + offset % GAIN_BLOCK_SIZE) as u8
     }
 }
 
-/// Get a mutable reference to all 8 voices.
-///
-/// # Safety
-/// This function creates a mutable reference to memory-mapped hardware.
-/// The caller must ensure exclusive access to the voice registers.
+/// Get handles to all 7 voices.
 #[inline]
-pub fn voices() -> &'static mut [Voice; VOICE_COUNT] {
-    unsafe { &mut *(VOICE_BASE as *mut [Voice; VOICE_COUNT]) }
+pub fn voices() -> [Voice; VOICE_COUNT] {
+    [0, 1, 2, 3, 4, 5, 6].map(|index| Voice { index })
 }
 
-/// Get a mutable reference to a single voice by index (0-7).
+/// Get a handle to a single voice by index.
 ///
 /// # Panics
-/// Panics if `index >= 8`.
+/// Panics if `index >= VOICE_COUNT`.
 #[inline]
-pub fn voice(index: usize) -> &'static mut Voice {
+pub fn voice(index: usize) -> Voice {
     assert!(index < VOICE_COUNT, "voice index out of range");
-    unsafe { &mut *((VOICE_BASE + index * VOICE_SIZE) as *mut Voice) }
+    Voice { index: index as u8 }
 }
 
 /// Silence all voices.
 #[inline]
 pub fn mute_all() {
-    let v = voices();
-    for voice in v.iter_mut() {
+    for voice in voices() {
         voice.mute();
     }
 }

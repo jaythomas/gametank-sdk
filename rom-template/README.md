@@ -57,7 +57,7 @@ features on the `rom` crate:
 | cargo feature               | firmware                  | description                 |
 | ----------------------------| ------------------------- | --------------------------- |
 | `audio-fm-4ch`              | 4-channel FM synth        | ADSR envelopes per operator |
-| `audio-wavetable` (default) | 7-channel wavetable synth | volume 0-63                 |
+| `audio-wavetable` (default) | 7-channel wavetable synth | volume 0-F                  |
 
 Build with a specific backend using `--no-default-features --features <name>`:
 

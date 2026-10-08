@@ -1435,7 +1435,7 @@ impl Component for ControlDeck {
             }
         }
 
-        for vis in 0..4usize {
+        for vis in 0..NUM_INSTRUMENTS - 6 {
             let idx = vis + 6;
             let cell_area = right_inst_rows[vis];
             let is_row = sel_row == Row::Instrument(idx);

@@ -1150,6 +1150,10 @@ impl Component for ControlDeck {
                                 match row {
                                     Row::ActionQuit => self.selected_row = Row::ActionNewOpen,
                                     Row::ActionExport => self.selected_row = Row::ActionSave,
+                                    Row::PatternNext => self.selected_row = Row::PatternPrev,
+                                    Row::PatternCopy => self.selected_row = Row::PatternNew,
+                                    Row::PatternDelete => self.selected_row = Row::PatternCopy,
+                                    Row::PatternZap => self.selected_row = Row::PatternDelete,
                                     _ => self.selected_col = self.selected_col.prev(row),
                                 }
                                 self.update_focus_states();
@@ -1159,6 +1163,10 @@ impl Component for ControlDeck {
                                 match row {
                                     Row::ActionNewOpen => self.selected_row = Row::ActionQuit,
                                     Row::ActionSave => self.selected_row = Row::ActionExport,
+                                    Row::PatternPrev => self.selected_row = Row::PatternNext,
+                                    Row::PatternNew => self.selected_row = Row::PatternCopy,
+                                    Row::PatternCopy => self.selected_row = Row::PatternDelete,
+                                    Row::PatternDelete => self.selected_row = Row::PatternZap,
                                     _ => self.selected_col = self.selected_col.next(row),
                                 }
                                 self.update_focus_states();
@@ -1389,7 +1397,9 @@ impl Component for ControlDeck {
         let left_inst_rows = Layout::vertical([Constraint::Length(1); 6]).split(inst_left_col);
         let right_inst_rows = Layout::vertical([Constraint::Length(1); 6]).split(inst_right_col);
 
-        for idx in 0..6usize {
+        const INST_LEFT_COUNT: usize = NUM_INSTRUMENTS / 2;
+
+        for idx in 0..INST_LEFT_COUNT {
             let cell_area = left_inst_rows[idx];
             let is_row = sel_row == Row::Instrument(idx);
             let open_focused = is_row && sel_col == Col::Open;
@@ -1435,8 +1445,8 @@ impl Component for ControlDeck {
             }
         }
 
-        for vis in 0..4usize {
-            let idx = vis + 6;
+        for vis in 0..NUM_INSTRUMENTS - INST_LEFT_COUNT {
+            let idx = vis + INST_LEFT_COUNT;
             let cell_area = right_inst_rows[vis];
             let is_row = sel_row == Row::Instrument(idx);
             let open_focused = is_row && sel_col == Col::Open;
@@ -1485,9 +1495,9 @@ impl Component for ControlDeck {
         let tuning_focused = sel_row == Row::ActionTuning;
         const TUNING_BTN_W: u16 = 15;
         let tuning_btn_area = Rect {
-            x: right_inst_rows[4].x,
-            y: right_inst_rows[4].y,
-            width: TUNING_BTN_W.min(right_inst_rows[4].width),
+            x: right_inst_rows[5].x,
+            y: right_inst_rows[5].y,
+            width: TUNING_BTN_W.min(right_inst_rows[5].width),
             height: 1,
         };
         self.action_tuning_btn.focus.set(tuning_focused);
@@ -1616,7 +1626,7 @@ impl Component for ControlDeck {
             &mut self.action_export_btn,
         );
 
-        let pattern_nav_row = action_rows[4];
+        let pattern_nav_row = action_rows[3];
         let pattern_prev_focused = sel_row == Row::PatternPrev;
         let pattern_next_focused = sel_row == Row::PatternNext;
         const PATTERN_NAV_BTN_W: u16 = 5;

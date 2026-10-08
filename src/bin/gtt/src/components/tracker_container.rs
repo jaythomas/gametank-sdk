@@ -110,6 +110,14 @@ impl TrackerContainer {
         self.pattern_editor.set_channel_muted(ch, muted);
     }
 
+    pub fn channel_count(&self) -> usize {
+        self.pattern_editor.channel_count()
+    }
+
+    pub fn solo_channel(&mut self, ch: usize) {
+        self.pattern_editor.solo_channel(ch);
+    }
+
     fn update_tuning_context(&mut self, tuning: &TuningData) {
         let scale_size = tuning.scale.len();
         let note_count = tuning.notes.len();

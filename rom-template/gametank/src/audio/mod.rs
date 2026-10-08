@@ -14,7 +14,7 @@
 //!
 //! let v = voices();
 //! v[0].set_note(MidiNote::C4);
-//! v[0].set_volume(63);
+//! v[0].set_volume(MAX_VOLUME);
 //! v[0].set_wavetable(WAVETABLE[0]);
 //! ```
 //!

@@ -10,42 +10,62 @@ use gte_w65c02s::W65C02S;
 use indexmap::IndexMap;
 
 use crate::file::NUM_INSTRUMENTS;
-use crate::tracker::{ChannelCmd, NOISE_INSTRUMENT, Pattern, SequencerCmd, empty_pattern};
+use crate::tracker::{MAX_VOLUME, VOLUME_LEVELS};
+use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
 
 const FIRMWARE: &[u8; 4096] =
     include_bytes!("../../../../rom-template/gametank/audiofw/wavetable.bin");
 
 const ROWS_PER_PATTERN: usize = 64;
 const AUDIO_CHANNELS: usize = 7;
-const CPU_FREQ: f64 = 3_579_545.0;
 
-const INSTRUMENT_SLOT_COUNT: usize = 11;
-const NOISE_SENTINEL_MODE0: u16 = 0xfffe;
-const NOISE_SENTINEL_MODE1: u16 = 0xffff;
 
-const WAVETABLE: [u16; INSTRUMENT_SLOT_COUNT] = [
-    0x0300,
-    0x0400,
-    0x0500,
-    0x0600,
+const WAVETABLE: [u16; NUM_INSTRUMENTS] = [
     0x0700,
     0x0800,
     0x0900,
     0x0A00,
     0x0B00,
     0x0C00,
-    NOISE_SENTINEL_MODE0,
+    0x0D00,
+    0x0E00,
 ];
 
-fn resolve_wavetable(idx: usize, noise_mode: Option<u8>) -> u16 {
-    if idx == NOISE_INSTRUMENT as usize {
-        match noise_mode {
-            Some(y) if y != 0 => NOISE_SENTINEL_MODE1,
-            _ => NOISE_SENTINEL_MODE0,
-        }
-    } else {
-        WAVETABLE[idx]
+/// ACP RAM addresses of the firmware's gain tables, indexed by volume level.
+/// Volume is a pointer into one of these rather than a level, so the firmware
+/// can scale a sample with a single indexed load. Four tables are interleaved
+/// per 256-byte block, so level L is at $0100 + 256 * (L / 4) + L % 4.
+const GAIN_PAGE: [u16; VOLUME_LEVELS] = {
+    let mut pages = [0u16; VOLUME_LEVELS];
+    let mut level = 0;
+    while level < VOLUME_LEVELS {
+        pages[level] = 0x0100 + (level as u16 / 4) * 0x100 + level as u16 % 4;
+        level += 1;
     }
+    pages
+};
+
+/// Voice parameters are operands inside each voice's code block in the firmware.
+/// Voice 1 starts here; voice 0 is pipelined by the firmware and sits after voice 6.
+const VOICE_CODE_BASE: usize = 0x0F0B;
+const VOICE_BLOCK_SIZE: usize = 29;
+const VOICE_0_CODE: usize = 0x0FB9;
+
+fn voice_code(ch: usize) -> usize {
+    if ch == 0 {
+        VOICE_0_CODE
+    } else {
+        VOICE_CODE_BASE + (ch - 1) * VOICE_BLOCK_SIZE
+    }
+}
+const FREQ_LO_OFFSET: usize = 4;
+const FREQ_HI_OFFSET: usize = 10;
+const WAVE_OFFSET: usize = 15;
+const GAIN_OFFSET: usize = 19;
+
+/// ACP clocks between samples at the given `audio_freq` register value.
+fn acp_cycles_per_sample(reg: u8) -> i32 {
+    crate::sample_rate::sample_rate_divisor(reg) as i32 * 4
 }
 
 pub enum PlayerCmd {
@@ -133,11 +153,11 @@ impl PlayerInner {
         acp.reset();
 
         let acp_bus = AcpBus {
-            irq_counter: (sample_rate_reg as i32) * 4,
+            irq_counter: acp_cycles_per_sample(sample_rate_reg),
             ..Default::default()
         };
 
-        let acp_sample_rate = CPU_FREQ / sample_rate_reg as f64;
+        let acp_sample_rate = crate::sample_rate::sample_rate_reg_to_hz(sample_rate_reg);
         let audio_out = GameTankAudio::new(acp_sample_rate, output_sample_rate);
 
         let samples_per_beat = output_sample_rate * 30.0 / (bpm.max(1) as f64);
@@ -286,35 +306,40 @@ impl PlayerInner {
         let base = WAVETABLE[idx] as usize;
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
-            (&mut (*aram_ptr))[base..base + 256].copy_from_slice(waveform);
+            for (dst, src) in (&mut (*aram_ptr))[base..base + 256].iter_mut().zip(waveform.iter())
+            {
+                *dst = *src & 0xFC;
+            }
         }
     }
 
     fn set_voice_frequency(&mut self, ch: usize, freq: u16) {
-        let base = 0x0041 + (ch * 7);
+        let base = voice_code(ch);
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
-            (*aram_ptr)[base + 2] = (freq & 0xFF) as u8;
-            (*aram_ptr)[base + 3] = (freq >> 8) as u8;
+            (*aram_ptr)[base + FREQ_LO_OFFSET] = (freq & 0xFF) as u8;
+            (*aram_ptr)[base + FREQ_HI_OFFSET] = (freq >> 8) as u8;
         }
     }
 
-    fn set_voice_waveptr(&mut self, ch: usize, waveform_idx: usize, noise_mode: Option<u8>) {
-        let base = 0x0041 + (ch * 7);
-        let ptr = resolve_wavetable(waveform_idx, noise_mode);
+    fn set_voice_waveptr(&mut self, ch: usize, waveform_idx: usize) {
+        let base = voice_code(ch) + WAVE_OFFSET;
+        let ptr = WAVETABLE[waveform_idx];
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
-            (*aram_ptr)[base + 4] = (ptr & 0xFF) as u8;
-            (*aram_ptr)[base + 5] = (ptr >> 8) as u8;
+            (*aram_ptr)[base] = (ptr & 0xFF) as u8;
+            (*aram_ptr)[base + 1] = (ptr >> 8) as u8;
         }
     }
 
     fn set_voice_volume(&mut self, ch: usize, volume: u8) {
-        let base = 0x0041 + (ch * 7);
-        let volume = if self.channel_muted[ch] { 0 } else { volume.min(63) };
+        let base = voice_code(ch) + GAIN_OFFSET;
+        let level = if self.channel_muted[ch] { 0 } else { volume.min(MAX_VOLUME) };
+        let page = GAIN_PAGE[level as usize];
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
-            (*aram_ptr)[base + 6] = volume;
+            (*aram_ptr)[base] = (page & 0xFF) as u8;
+            (*aram_ptr)[base + 1] = (page >> 8) as u8;
         }
     }
 
@@ -337,7 +362,6 @@ impl PlayerInner {
             let mut note_name: Option<String> = None;
             let mut base_freq: u16 = 0;
             let mut instrument = ch;
-            let mut instrument_mode: Option<u8> = None;
             for r in 0..row {
                 let beat = &self.patterns[pattern_idx][ch + 1][r];
                 for cmd in &beat.cmd_list {
@@ -358,9 +382,8 @@ impl PlayerInner {
                                 base_freq = freq_u32.min(0xFFFF) as u16;
                             }
                         }
-                        ChannelCmd::Instrument(idx, y) => {
+                        ChannelCmd::Instrument(idx) => {
                             instrument = *idx as usize;
-                            instrument_mode = *y;
                         }
                         _ => {}
                     }
@@ -371,7 +394,7 @@ impl PlayerInner {
             self.cur_note_name[ch] = note_name;
             self.base_freq[ch] = base_freq;
             self.current_instrument[ch] = instrument;
-            self.set_voice_waveptr(ch, instrument, instrument_mode);
+            self.set_voice_waveptr(ch, instrument);
             self.arp_active[ch] = false;
             self.pitch_active[ch] = false;
             self.fade_active[ch] = false;
@@ -475,7 +498,7 @@ impl PlayerInner {
                 _ => None,
             });
             let maybe_instrument = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::Instrument(idx, y) => Some((*idx as usize, *y)),
+                ChannelCmd::Instrument(idx) => Some(*idx as usize),
                 _ => None,
             });
             let maybe_pitch_up = beat.cmd_list.iter().find_map(|c| match c {
@@ -499,9 +522,9 @@ impl PlayerInner {
                 _ => None,
             });
 
-            if let Some((idx, y)) = maybe_instrument {
+            if let Some(idx) = maybe_instrument {
                 self.current_instrument[ch] = idx;
-                self.set_voice_waveptr(ch, idx, y);
+                self.set_voice_waveptr(ch, idx);
             }
 
             if let Some(v) = maybe_vol {
@@ -532,17 +555,19 @@ impl PlayerInner {
                 self.tremble_active[ch] = false;
                 self.fade_target[ch] = cur_effective_vol;
                 self.fade_cur[ch] = 0;
-                self.vol_fx_hold[ch] = x;
-                self.vol_fx_counter[ch] = x;
-                self.set_voice_volume(ch, 0);
+                let fade_hold = (x >> 4).max(1);
+                self.vol_fx_hold[ch] = fade_hold;
+                self.vol_fx_counter[ch] = fade_hold;
+                self.set_voice_volume(ch, self.fade_cur[ch]);
             } else if let Some(x) = maybe_fade_out {
                 self.fade_active[ch] = true;
                 self.tremble_active[ch] = false;
                 self.fade_target[ch] = 0;
                 self.fade_cur[ch] = cur_effective_vol;
-                self.vol_fx_hold[ch] = x;
-                self.vol_fx_counter[ch] = x;
-                self.set_voice_volume(ch, cur_effective_vol);
+                let fade_hold = (x >> 4).max(1);
+                self.vol_fx_hold[ch] = fade_hold;
+                self.vol_fx_counter[ch] = fade_hold;
+                self.set_voice_volume(ch, self.fade_cur[ch]);
             } else if let Some(x) = maybe_tremble {
                 self.fade_active[ch] = false;
                 self.tremble_active[ch] = true;
@@ -676,13 +701,7 @@ impl PlayerInner {
                 if self.vol_fx_counter[ch] == 0 {
                     let cur = self.fade_cur[ch];
                     let target = self.fade_target[ch];
-                    let next = if cur < target {
-                        cur + 1
-                    } else if cur > target {
-                        cur - 1
-                    } else {
-                        cur
-                    };
+                    let next = if cur < target { cur + 1 } else { cur - 1 };
                     self.fade_cur[ch] = next;
                     self.set_voice_volume(ch, next);
                     if next == target {
@@ -710,7 +729,7 @@ impl PlayerInner {
     }
 
     fn run_acp_until_sample(&mut self) -> bool {
-        let cycles_per_sample = (self.acp_sample_rate_reg as i32) * 4;
+        let cycles_per_sample = acp_cycles_per_sample(self.acp_sample_rate_reg);
         let max_cycles = cycles_per_sample * 8;
         let mut cycles_run = 0;
 

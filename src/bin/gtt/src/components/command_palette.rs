@@ -38,6 +38,7 @@ impl CommandPalette {
             "mute" => actions.push(ComponentAction::MuteChannel),
             "unmute" => actions.push(ComponentAction::UnmuteChannel),
             "m" => actions.push(ComponentAction::ToggleMuteChannel),
+            "solo" | "s" => actions.push(ComponentAction::SoloChannel),
             _ => {}
         }
         self.input.set_value("");

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
@@ -5,14 +6,25 @@ use crate::file::{NUM_INSTRUMENTS, TrackerFile};
 use crate::sample_rate::{SAMPLE_RATE_REG, sample_rate_reg_to_hz};
 use crate::tracker::{
     ChannelCmd, FX_ID_ARPEGGIO, FX_ID_FADE_IN, FX_ID_FADE_OUT, FX_ID_INSTRUMENT, FX_ID_NONE,
-    FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, FX_ID_TREMBLE, SequencerCmd,
+    FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, FX_ID_TREMBLE, MAX_VOLUME, SequencerCmd,
 };
 
 const CHANNELS: usize = 7;
 
-const VOL_NO_CHANGE: u8 = 0xFF;
+const TRACK_HEADER_SIZE: usize = 6;
 
-const TRACK_HEADER_SIZE: usize = 5;
+// Frequency table slot 0 is reserved: a note index of 0 means "no note here".
+const FREQ_INDEX_NONE: u8 = 0;
+const MAX_FREQ_ENTRIES: usize = 256;
+
+// Set in a pattern's channel mask when the pattern carries a sequence-command list.
+const PATTERN_HAS_SEQ: u8 = 0x80;
+
+// vol_fx byte: volume in the low five bits, effect ID in the top three. The
+// volume needs 24 values, which leaves 31 spare to mean "leave it alone" - a
+// sentinel rather than a flag bit, because there is no eighth bit to spare.
+const VOL_FX_ID_SHIFT: u8 = 5;
+const VOL_FX_VOLUME_HOLD: u8 = 0x1F;
 
 const ARP_NO_THIRD_NOTE: u8 = 0xFF;
 
@@ -49,7 +61,6 @@ fn pitch_down_offset_freq_inc(
 }
 
 // SequencerCmd encoding
-const SEQ_CMD_NONE: u8 = 0;
 const SEQ_CMD_STOP: u8 = 1;
 const SEQ_CMD_TEMPO: u8 = 2;
 const SEQ_CMD_FX_SPEED: u8 = 3;
@@ -57,17 +68,40 @@ const SEQ_CMD_FLOW_COUNT: u8 = 4;
 const SEQ_CMD_COUNT_JUMP: u8 = 5;
 const SEQ_CMD_JUMP: u8 = 6;
 
+/// One channel's worth of a single beat, before frequencies are swapped for
+/// frequency-table indices.
+#[derive(Clone, Copy, Default)]
+struct Cell {
+    freq: u16,
+    vol: Option<u8>,
+    fx_id: u8,
+    fx_x: u8,
+    fx_freq_x: u16,
+    fx_freq_y: u16,
+}
+
+impl Cell {
+    fn is_empty(&self) -> bool {
+        self.freq == 0 && self.vol.is_none() && self.fx_id == FX_ID_NONE
+    }
+}
+
+struct BakedPattern {
+    beats: usize,
+    // [channel][beat]
+    cells: Vec<Vec<Cell>>,
+    // (beat, cmd, value, value2), ascending by beat
+    seq: Vec<(u8, u8, u8, u8)>,
+}
+
 fn bake_pattern(
     file: &TrackerFile,
     pattern_idx: usize,
     beats: usize,
     sample_rate_hz: f64,
-) -> Vec<u8> {
+) -> BakedPattern {
     let pattern = file.current_pattern(pattern_idx as u8);
-    let channel_stride = beats * 10;
-    let seq_cmd_base = 1 + CHANNELS * channel_stride;
-    let mut out = vec![0u8; seq_cmd_base + beats * 3];
-    out[0] = beats as u8;
+    let mut cells = vec![vec![Cell::default(); beats]; CHANNELS];
 
     for ch in 0..CHANNELS {
         let mut cur_freq: u16 = 0;
@@ -100,15 +134,15 @@ fn bake_pattern(
                         cur_note_name = None;
                     }
                     ChannelCmd::Volume(v) => {
-                        explicit_vol = Some((*v).min(63));
+                        explicit_vol = Some((*v).min(MAX_VOLUME));
                     }
                     ChannelCmd::NoteOff => {
                         has_note_off = true;
                     }
-                    ChannelCmd::Instrument(idx, y) => {
+                    ChannelCmd::Instrument(idx) => {
                         fx_id = FX_ID_INSTRUMENT;
                         fx_x = *idx;
-                        fx_y = y.unwrap_or(0);
+                        fx_y = 0;
                     }
                     ChannelCmd::Arpeggio(x, y) => {
                         fx_id = FX_ID_ARPEGGIO;
@@ -142,15 +176,15 @@ fn bake_pattern(
             let vol_out = if let Some(v) = explicit_vol {
                 remembered_vol = v;
                 muted = false;
-                v
+                Some(v)
             } else if has_note_off {
                 muted = true;
-                0
+                Some(0)
             } else if has_note && muted {
                 muted = false;
-                remembered_vol
+                Some(remembered_vol)
             } else {
-                VOL_NO_CHANGE
+                None
             };
 
             let (mut fx_freq_x, mut fx_freq_y) = (0u16, 0u16);
@@ -164,32 +198,32 @@ fn bake_pattern(
             } else if fx_id == FX_ID_PITCH_UP
                 && let Some(name) = &cur_note_name
             {
-                fx_freq_x = arp_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(cur_freq);
+                fx_freq_x =
+                    arp_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(cur_freq);
             } else if fx_id == FX_ID_PITCH_DOWN
                 && let Some(name) = &cur_note_name
             {
-                fx_freq_x =
-                    pitch_down_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(cur_freq);
+                fx_freq_x = pitch_down_offset_freq_inc(file, name, fx_x, sample_rate_hz)
+                    .unwrap_or(cur_freq);
             }
 
-            let base = 1 + ch * channel_stride;
-            out[base + beat] = (cur_freq & 0xFF) as u8;
-            out[base + beats + beat] = (cur_freq >> 8) as u8;
-            out[base + beats * 2 + beat] = vol_out;
-            out[base + beats * 3 + beat] = fx_id;
-            out[base + beats * 4 + beat] = fx_x;
-            out[base + beats * 5 + beat] = fx_y;
-            out[base + beats * 6 + beat] = (fx_freq_x & 0xFF) as u8;
-            out[base + beats * 7 + beat] = (fx_freq_x >> 8) as u8;
-            out[base + beats * 8 + beat] = (fx_freq_y & 0xFF) as u8;
-            out[base + beats * 9 + beat] = (fx_freq_y >> 8) as u8;
+            cells[ch][beat] = Cell {
+                freq: cur_freq,
+                vol: vol_out,
+                fx_id,
+                fx_x,
+                fx_freq_x,
+                fx_freq_y,
+            };
         }
     }
 
-    // The SEQ lane carries one pattern-wide SequencerCmd per beat
+    // The SEQ lane carries one pattern-wide SequencerCmd per beat. Only the
+    // beats that actually have one are written out, so the sequencer scans a
+    // handful of entries instead of reading three arrays every beat.
+    let mut seq = Vec::new();
     for beat in 0..beats {
-        let seq_row = &pattern[0][beat];
-        let (seq_cmd_type, seq_cmd_value, seq_cmd_value2) = match &seq_row.sqc {
+        let encoded = match &pattern[0][beat].sqc {
             Some(SequencerCmd::Stop) => (SEQ_CMD_STOP, 0u8, 0u8),
             Some(SequencerCmd::Tempo(bpm)) => (SEQ_CMD_TEMPO, *bpm, 0u8),
             Some(SequencerCmd::FxSpeed(fx_speed)) => (SEQ_CMD_FX_SPEED, *fx_speed, 0u8),
@@ -197,41 +231,145 @@ fn bake_pattern(
             Some(SequencerCmd::CountJump(pat, beat_target)) => {
                 (SEQ_CMD_COUNT_JUMP, *pat, *beat_target)
             }
-            Some(SequencerCmd::Jump(pat, beat_target)) => {
-                (SEQ_CMD_JUMP, *pat, *beat_target)
-            }
-            None => (SEQ_CMD_NONE, 0u8, 0u8),
+            Some(SequencerCmd::Jump(pat, beat_target)) => (SEQ_CMD_JUMP, *pat, *beat_target),
+            None => continue,
         };
-        out[seq_cmd_base + beat] = seq_cmd_type;
-        out[seq_cmd_base + beats + beat] = seq_cmd_value;
-        out[seq_cmd_base + beats * 2 + beat] = seq_cmd_value2;
+        seq.push((beat as u8, encoded.0, encoded.1, encoded.2));
     }
 
-    out
+    BakedPattern { beats, cells, seq }
 }
 
-fn build_track_bin(bpm: u16, fx_speed: u8, baked: &[Vec<u8>]) -> Vec<u8> {
+/// Every distinct phase increment the track uses, so patterns can refer to one
+/// by a single-byte index instead of repeating a 16-bit value every beat.
+struct FreqTable {
+    entries: Vec<u16>,
+    index_of: HashMap<u16, u8>,
+}
+
+impl FreqTable {
+    fn new() -> Self {
+        Self {
+            entries: vec![0],
+            index_of: HashMap::new(),
+        }
+    }
+
+    fn intern(&mut self, freq: u16) -> io::Result<u8> {
+        if freq == 0 {
+            return Ok(FREQ_INDEX_NONE);
+        }
+        if let Some(&idx) = self.index_of.get(&freq) {
+            return Ok(idx);
+        }
+        if self.entries.len() >= MAX_FREQ_ENTRIES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "track uses more than {} distinct frequencies, which do not fit the \
+                     one-byte note indices the exported format uses",
+                    MAX_FREQ_ENTRIES - 1
+                ),
+            ));
+        }
+        let idx = self.entries.len() as u8;
+        self.entries.push(freq);
+        self.index_of.insert(freq, idx);
+        Ok(idx)
+    }
+}
+
+fn serialize_pattern(pattern: &BakedPattern, freqs: &mut FreqTable) -> io::Result<Vec<u8>> {
+    let mut channel_mask = 0u8;
+    let mut fx_mask = 0u8;
+    for ch in 0..CHANNELS {
+        let cells = &pattern.cells[ch];
+        if cells.iter().any(|c| !c.is_empty()) {
+            channel_mask |= 1 << ch;
+        }
+        if cells.iter().any(|c| c.fx_id != FX_ID_NONE) {
+            fx_mask |= 1 << ch;
+        }
+    }
+    if !pattern.seq.is_empty() {
+        channel_mask |= PATTERN_HAS_SEQ;
+    }
+
+    let mut out = vec![pattern.beats as u8, channel_mask, fx_mask];
+
+    if !pattern.seq.is_empty() {
+        out.push(pattern.seq.len() as u8);
+        for &(beat, cmd, value, value2) in &pattern.seq {
+            out.extend_from_slice(&[beat, cmd, value, value2]);
+        }
+    }
+
+    for ch in 0..CHANNELS {
+        if channel_mask & (1 << ch) == 0 {
+            continue;
+        }
+        let cells = &pattern.cells[ch];
+
+        for cell in cells {
+            out.push(freqs.intern(cell.freq)?);
+        }
+        for cell in cells {
+            let mut vol_fx = cell.fx_id << VOL_FX_ID_SHIFT;
+            vol_fx |= match cell.vol {
+                Some(v) => v.min(MAX_VOLUME),
+                None => VOL_FX_VOLUME_HOLD,
+            };
+            out.push(vol_fx);
+        }
+
+        if fx_mask & (1 << ch) == 0 {
+            continue;
+        }
+        for cell in cells {
+            out.push(cell.fx_x);
+        }
+        for cell in cells {
+            out.push(freqs.intern(cell.fx_freq_x)?);
+        }
+        for cell in cells {
+            out.push(freqs.intern(cell.fx_freq_y)?);
+        }
+    }
+
+    Ok(out)
+}
+
+fn build_track_bin(bpm: u16, fx_speed: u8, baked: &[BakedPattern]) -> io::Result<Vec<u8>> {
     let pattern_count = baked.len();
-    let patterns_table_offset = TRACK_HEADER_SIZE;
+
+    let mut freqs = FreqTable::new();
+    let mut blocks = Vec::with_capacity(pattern_count);
+    for pattern in baked {
+        blocks.push(serialize_pattern(pattern, &mut freqs)?);
+    }
+
+    let mut running = TRACK_HEADER_SIZE + pattern_count * 2 + freqs.entries.len() * 2;
     let mut pattern_offsets = Vec::with_capacity(pattern_count);
-    let mut running = patterns_table_offset + pattern_count * 2;
-    for data in baked {
-        let pattern_size = data.len();
+    for block in &blocks {
         pattern_offsets.push(running as u16);
-        running += pattern_size;
+        running += block.len();
     }
 
     let mut out = Vec::with_capacity(running);
     out.extend_from_slice(&bpm.to_le_bytes());
     out.extend_from_slice(&(fx_speed as u16).to_le_bytes());
     out.push(pattern_count as u8);
+    out.push(freqs.entries.len() as u8);
     for off in &pattern_offsets {
         out.extend_from_slice(&off.to_le_bytes());
     }
-    for data in baked {
-        out.extend_from_slice(data);
+    for freq in &freqs.entries {
+        out.extend_from_slice(&freq.to_le_bytes());
     }
-    out
+    for block in &blocks {
+        out.extend_from_slice(block);
+    }
+    Ok(out)
 }
 
 pub fn export_all(
@@ -241,17 +379,7 @@ pub fn export_all(
     stem: &str,
     export_dir: &Path,
 ) -> io::Result<()> {
-    std::fs::create_dir_all(export_dir)?;
-
-    let instruments_dir = export_dir.join("instruments");
-    std::fs::create_dir_all(&instruments_dir)?;
-
-    for i in 0..NUM_INSTRUMENTS {
-        let path = instruments_dir.join(format!("instrument_{}.raw", i));
-        std::fs::write(path, &file.instruments[i].waveform)?;
-    }
-
-    let baked: Vec<Vec<u8>> = (0..file.patterns.len())
+    let baked: Vec<BakedPattern> = (0..file.patterns.len())
         .map(|i| {
             bake_pattern(
                 file,
@@ -262,7 +390,19 @@ pub fn export_all(
         })
         .collect();
 
-    let track_bin = build_track_bin(bpm, fx_speed, &baked);
+    // Built before anything is written so a track that overflows the frequency
+    // table doesn't leave a half-finished export behind.
+    let track_bin = build_track_bin(bpm, fx_speed, &baked)?;
+
+    std::fs::create_dir_all(export_dir)?;
+    let instruments_dir = export_dir.join("instruments");
+    std::fs::create_dir_all(&instruments_dir)?;
+
+    for i in 0..NUM_INSTRUMENTS {
+        let path = instruments_dir.join(format!("instrument_{}.raw", i));
+        std::fs::write(path, &file.instruments[i].waveform)?;
+    }
+
     std::fs::write(export_dir.join(format!("{}.bin", stem)), track_bin)?;
 
     Ok(())

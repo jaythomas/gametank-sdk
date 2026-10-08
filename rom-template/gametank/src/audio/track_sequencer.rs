@@ -1,9 +1,7 @@
-use super::wavetable::{
-    NOISE_INSTRUMENT, NOISE_SENTINEL_MODE0, NOISE_SENTINEL_MODE1, VOICE_COUNT, WAVETABLE, voices,
-};
+use super::wavetable::{VOICE_COUNT, WAVETABLE, WAVETABLE_COUNT, voices};
 use crate::console::Console;
 
-const SAMPLE_RATE_REG: u8 = 0xD7;
+const SAMPLE_RATE_REG: u8 = 0xA8;
 
 macro_rules! instrument_table {
     ($n:literal) => {
@@ -16,12 +14,12 @@ macro_rules! instrument_table {
     };
 }
 
-// The 10 fixed instrument slots don't fit in FIXED_FLASH
+// The 8 fixed instrument slots don't fit in FIXED_FLASH
 // alongside everything else, so they're placed in bank 125.
 const INSTRUMENT_BANK: u8 = 125;
 
 #[unsafe(link_section = ".rodata.bank125")]
-static INSTRUMENT_TABLES: [[u8; 256]; 10] = [
+static INSTRUMENT_TABLES: [[u8; 256]; WAVETABLE_COUNT] = [
     instrument_table!(0),
     instrument_table!(1),
     instrument_table!(2),
@@ -30,23 +28,7 @@ static INSTRUMENT_TABLES: [[u8; 256]; 10] = [
     instrument_table!(5),
     instrument_table!(6),
     instrument_table!(7),
-    instrument_table!(8),
-    instrument_table!(9),
 ];
-
-// Number of parallel per-beat arrays packed into each channel's slice of a
-// pattern's data block:
-// - freq_lo
-// - freq_hi
-// - vol
-// - fx_id
-// - fx_x
-// - fx_y
-// - fx_freq_x_lo
-// - fx_freq_x_hi
-// - fx_freq_y_lo
-// - fx_freq_y_hi
-const CHANNEL_ARRAYS: usize = 10;
 
 const FX_ID_INSTRUMENT: u8 = 1;
 const FX_ID_ARPEGGIO: u8 = 2;
@@ -55,7 +37,6 @@ const FX_ID_PITCH_DOWN: u8 = 4;
 const FX_ID_FADE_IN: u8 = 5;
 const FX_ID_FADE_OUT: u8 = 6;
 const FX_ID_TREMBLE: u8 = 7;
-const ARP_NO_THIRD_NOTE: u8 = 0xFF;
 
 /// Drives the 7-channel wavetable synth from a gt-tracker export. Create one
 /// sequencer per track, point it at the `<name>_track` descriptor, then call
@@ -74,7 +55,13 @@ pub struct TrackSequencer {
     pattern_count: u8,
     flow_count: u8,
     stopped: bool,
-    fx_active_any: bool,
+    // One bit per channel with an effect still running. Sub-beat ticks are
+    // skipped entirely while it is zero, and each effect clears its own bit as
+    // soon as it finishes rather than waiting for the next beat.
+    fx_active_mask: u8,
+    // Phase increments are stored once per track and referenced by a one-byte
+    // index from the patterns.
+    freq_table: *const u16,
 }
 
 // Channel base note pitch, written by `advance_beat`. This is different than the active
@@ -115,7 +102,28 @@ static mut TREMBLE_MUTED: [bool; VOICE_COUNT] = [false; VOICE_COUNT];
 const TRACK_BPM_OFFSET: usize = 0;
 const TRACK_SPEED_OFFSET: usize = 2;
 const TRACK_PATTERN_COUNT_OFFSET: usize = 4;
-const TRACK_HEADER_SIZE: usize = 5;
+const TRACK_HEADER_SIZE: usize = 6;
+
+// A pattern block opens with its beat count and two channel bitmasks, so the
+// sequencer can skip channels the pattern never writes to and skip the effect
+// arrays for channels that have no effects.
+const PATTERN_BEATS_OFFSET: usize = 0;
+const PATTERN_CHANNEL_MASK_OFFSET: usize = 1;
+const PATTERN_FX_MASK_OFFSET: usize = 2;
+const PATTERN_HEADER_SIZE: usize = 3;
+// Set in the channel mask when the pattern carries a sequence-command list.
+const PATTERN_HAS_SEQ: u8 = 0x80;
+// Bytes per entry in that list: beat, command, value, value2.
+const SEQ_ENTRY_SIZE: usize = 4;
+
+// Each beat packs a channel's volume and effect ID into one byte: volume in
+// the low five bits, effect ID in the top three. The volume needs 24 values,
+// which leaves 31 spare to mean "leave it alone" - a sentinel rather than a
+// flag bit, because there is no eighth bit to spare.
+const VOL_FX_VOLUME_MASK: u8 = 0x1F;
+const VOL_FX_ID_SHIFT: u8 = 5;
+const VOL_FX_ID_MASK: u8 = 0x07;
+const VOL_FX_VOLUME_HOLD: u8 = 0x1F;
 
 // seq_cmd_type values baked into each pattern's trailing per-beat arrays
 const SEQ_CMD_STOP: u8 = 1;
@@ -132,6 +140,8 @@ impl TrackSequencer {
         let bpm = unsafe { read_u16(track, TRACK_BPM_OFFSET) };
         let speed = unsafe { read_u16(track, TRACK_SPEED_OFFSET) };
         let pattern_count = unsafe { *track.add(TRACK_PATTERN_COUNT_OFFSET) };
+        let freq_table =
+            unsafe { track.add(TRACK_HEADER_SIZE + pattern_count as usize * 2) as *const u16 };
         console.set_rom_bank(restore_bank);
         Self {
             track,
@@ -145,7 +155,8 @@ impl TrackSequencer {
             pattern_count,
             flow_count: 0,
             stopped: false,
-            fx_active_any: false,
+            fx_active_mask: 0,
+            freq_table,
         }
     }
 
@@ -175,7 +186,7 @@ impl TrackSequencer {
 
         self.frame_acc += self.bpm;
 
-        if self.fx_active_any {
+        if self.fx_active_mask != 0 {
             let mut remaining = self.speed;
             while remaining > 0 {
                 // read_volatile prevents LLVM from trying to optimize this into an unsupported `__mulhi3`
@@ -198,12 +209,18 @@ impl TrackSequencer {
         }
     }
 
-    // Run sub-tick effect
+    // Run sub-tick effects for the channels that still have one running
     fn advance_tick(&mut self) {
         let v = voices();
         let speed = self.speed << 2;
+        let mut mask = self.fx_active_mask;
+        let mut bit = 1u8;
         unsafe {
             for ch in 0..VOICE_COUNT {
+                if mask & bit == 0 {
+                    bit <<= 1;
+                    continue;
+                }
                 if ACTIVE_FX[ch] == ACTIVE_FX_ARP {
                     let freq = match ARP_STEP[ch] {
                         0 => BASE_FREQ[ch],
@@ -223,6 +240,7 @@ impl TrackSequencer {
                         let stepped = cur.saturating_add(speed);
                         if stepped >= target {
                             ACTIVE_FX[ch] = ACTIVE_FX_NONE;
+                            mask &= !bit;
                             target
                         } else {
                             stepped
@@ -231,12 +249,14 @@ impl TrackSequencer {
                         let stepped = cur.saturating_sub(speed);
                         if stepped <= target {
                             ACTIVE_FX[ch] = ACTIVE_FX_NONE;
+                            mask &= !bit;
                             target
                         } else {
                             stepped
                         }
                     } else {
                         ACTIVE_FX[ch] = ACTIVE_FX_NONE;
+                        mask &= !bit;
                         target
                     };
                     PITCH_CUR[ch] = next;
@@ -245,17 +265,12 @@ impl TrackSequencer {
                     if VOL_FX_COUNTER[ch] == 0 {
                         let cur = FADE_CUR[ch];
                         let target = FADE_TARGET[ch];
-                        let next = if cur < target {
-                            cur + 1
-                        } else if cur > target {
-                            cur - 1
-                        } else {
-                            cur
-                        };
+                        let next = if cur < target { cur + 1 } else { cur - 1 };
                         FADE_CUR[ch] = next;
                         v[ch].set_volume(next);
                         if next == target {
                             ACTIVE_FX[ch] = ACTIVE_FX_NONE;
+                            mask &= !bit;
                         }
                         VOL_FX_COUNTER[ch] = VOL_FX_HOLD[ch];
                     } else {
@@ -270,8 +285,10 @@ impl TrackSequencer {
                         VOL_FX_COUNTER[ch] -= 1;
                     }
                 }
+                bit <<= 1;
             }
         }
+        self.fx_active_mask = mask;
     }
 
     fn pattern_ptr(&self, pattern_idx: u8) -> *const u8 {
@@ -280,59 +297,69 @@ impl TrackSequencer {
         unsafe { self.track.add(pattern_offset) }
     }
 
+    // Resolve a one-byte note index against the track's frequency table. Slot 0
+    // is reserved, so it always reads back as "no note here".
+    fn freq(&self, index: u8) -> u16 {
+        unsafe { read_ptr(self.freq_table, index as usize) }
+    }
+
     // Processes sequence and channel commands for the current pattern_idx+beat
     fn advance_beat(&mut self) {
         loop {
             let pat = self.pattern_ptr(self.pattern_idx);
-            let pattern_beats = unsafe { *pat } as usize;
-            let data = unsafe { pat.add(1) };
-            // channel_stride = pattern_beats * CHANNEL_ARRAYS
-            let mut channel_stride = 0usize;
-            for _ in 0..CHANNEL_ARRAYS {
-                channel_stride += pattern_beats;
-            }
+            let pattern_beats = unsafe { *pat.add(PATTERN_BEATS_OFFSET) } as usize;
+            let channel_mask = unsafe { *pat.add(PATTERN_CHANNEL_MASK_OFFSET) };
+            let fx_mask = unsafe { *pat.add(PATTERN_FX_MASK_OFFSET) };
+            let mut data = unsafe { pat.add(PATTERN_HEADER_SIZE) };
+            let beat = self.beat;
 
-            let beat = self.beat as usize;
+            let mut jumped = false;
+            if channel_mask & PATTERN_HAS_SEQ != 0 {
+                let seq_count = unsafe { *data } as usize;
+                let entries = unsafe { data.add(1) };
+                data = unsafe { entries.add(seq_count * SEQ_ENTRY_SIZE) };
 
-            let seq_cmd_base = mul_by_const(channel_stride, VOICE_COUNT);
-            let off_seq_cmd_type = 0usize;
-            let off_seq_cmd_value = off_seq_cmd_type + pattern_beats;
-            let off_seq_cmd_value2 = off_seq_cmd_value + pattern_beats;
-            let seq_cmd_type = unsafe { *data.add(seq_cmd_base + off_seq_cmd_type + beat) };
-            let seq_cmd_value = unsafe { *data.add(seq_cmd_base + off_seq_cmd_value + beat) };
-            let seq_cmd_value2 = unsafe { *data.add(seq_cmd_base + off_seq_cmd_value2 + beat) };
-
-            match seq_cmd_type {
-                SEQ_CMD_STOP => {
-                    self.stopped = true;
-                    return;
-                }
-                SEQ_CMD_TEMPO => {
-                    self.bpm = seq_cmd_value as u16;
-                }
-                SEQ_CMD_SPEED => {
-                    self.speed = seq_cmd_value as u16;
-                }
-                SEQ_CMD_FLOW_COUNT => {
-                    self.flow_count = seq_cmd_value;
-                }
-                SEQ_CMD_COUNT_JUMP => {
-                    if self.flow_count > 0 {
-                        self.flow_count -= 1;
-                        self.pattern_idx = seq_cmd_value.min(self.pattern_count.saturating_sub(1));
-                        self.beat = seq_cmd_value2;
-                        continue;
+                if let Some(entry) = unsafe { find_seq_entry(entries, seq_count, beat) } {
+                    let seq_cmd_value = unsafe { *entry.add(2) };
+                    let seq_cmd_value2 = unsafe { *entry.add(3) };
+                    match unsafe { *entry.add(1) } {
+                        SEQ_CMD_STOP => {
+                            self.stopped = true;
+                            return;
+                        }
+                        SEQ_CMD_TEMPO => {
+                            self.bpm = seq_cmd_value as u16;
+                        }
+                        SEQ_CMD_SPEED => {
+                            self.speed = seq_cmd_value as u16;
+                        }
+                        SEQ_CMD_FLOW_COUNT => {
+                            self.flow_count = seq_cmd_value;
+                        }
+                        SEQ_CMD_COUNT_JUMP => {
+                            if self.flow_count > 0 {
+                                self.flow_count -= 1;
+                                self.pattern_idx =
+                                    seq_cmd_value.min(self.pattern_count.saturating_sub(1));
+                                self.beat = seq_cmd_value2;
+                                jumped = true;
+                            }
+                        }
+                        SEQ_CMD_JUMP => {
+                            self.pattern_idx =
+                                seq_cmd_value.min(self.pattern_count.saturating_sub(1));
+                            self.beat = seq_cmd_value2;
+                            jumped = true;
+                        }
+                        _ => {}
                     }
                 }
-                SEQ_CMD_JUMP => {
-                    self.pattern_idx = seq_cmd_value.min(self.pattern_count.saturating_sub(1));
-                    self.beat = seq_cmd_value2;
-                    continue;
-                }
-                _ => {}
+            }
+            if jumped {
+                continue;
             }
 
-            self.trigger_channels(data, channel_stride, pattern_beats, beat);
+            self.trigger_channels(data, pattern_beats, beat as usize, channel_mask, fx_mask);
 
             self.beat += 1;
             if (self.beat as usize) >= pattern_beats {
@@ -345,31 +372,46 @@ impl TrackSequencer {
     fn trigger_channels(
         &mut self,
         data: *const u8,
-        channel_stride: usize,
         pattern_beats: usize,
         beat: usize,
+        channel_mask: u8,
+        fx_mask: u8,
     ) {
-        let off_freq_lo = 0usize;
-        let off_freq_hi = off_freq_lo + pattern_beats;
-        let off_vol = off_freq_hi + pattern_beats;
-        let off_fx_id = off_vol + pattern_beats;
-        let off_fx_x = off_fx_id + pattern_beats;
-        let off_fx_y = off_fx_x + pattern_beats;
-        let off_fx_freq_x_lo = off_fx_y + pattern_beats;
-        let off_fx_freq_x_hi = off_fx_freq_x_lo + pattern_beats;
-        let off_fx_freq_y_lo = off_fx_freq_x_hi + pattern_beats;
-        let off_fx_freq_y_hi = off_fx_freq_y_lo + pattern_beats;
+        // Channels sit back to back, so each one's arrays begin where the
+        // previous channel's ended - two arrays wide normally, five when the
+        // channel uses effects. Walking them costs adds rather than a multiply.
+        let to_vol_fx = pattern_beats;
+        let to_fx_x = to_vol_fx + pattern_beats;
+        let to_fx_freq_x = to_fx_x + pattern_beats;
+        let to_fx_freq_y = to_fx_freq_x + pattern_beats;
+        let plain_channel = to_fx_x;
+        let fx_channel = to_fx_freq_y + pattern_beats;
 
         let v = voices();
-        let mut base = 0usize;
-        let mut any_active = false;
+        let mut cur = unsafe { data.add(beat) };
+        let mut bit = 1u8;
+        let mut active = 0u8;
+
         for ch in 0..VOICE_COUNT {
-            let lo = unsafe { *data.add(base + off_freq_lo + beat) } as u16;
-            let hi = unsafe { *data.add(base + off_freq_hi + beat) } as u16;
-            let vol = unsafe { *data.add(base + off_vol + beat) };
-            let fx_id = unsafe { *data.add(base + off_fx_id + beat) };
-            let fx_x = unsafe { *data.add(base + off_fx_x + beat) };
-            let fx_y = unsafe { *data.add(base + off_fx_y + beat) };
+            // A channel this pattern never writes to reads as an empty beat,
+            // which still means something: it ends any effect left running.
+            let mut note_idx = 0u8;
+            let mut vol_fx = 0u8;
+            let mut fx_x = 0u8;
+            let mut fx_freq_x_idx = 0u8;
+            let mut fx_freq_y_idx = 0u8;
+            if channel_mask & bit != 0 {
+                note_idx = unsafe { *cur };
+                vol_fx = unsafe { *cur.add(to_vol_fx) };
+                if fx_mask & bit != 0 {
+                    fx_x = unsafe { *cur.add(to_fx_x) };
+                    fx_freq_x_idx = unsafe { *cur.add(to_fx_freq_x) };
+                    fx_freq_y_idx = unsafe { *cur.add(to_fx_freq_y) };
+                    cur = unsafe { cur.add(fx_channel) };
+                } else {
+                    cur = unsafe { cur.add(plain_channel) };
+                }
+            }
 
             // Whether a glide effect was in progress before this beat, so
             // switching to a non-glide fx only resets hardware that a glide
@@ -378,42 +420,43 @@ impl TrackSequencer {
             let had_freq_fx = prev_fx == ACTIVE_FX_ARP || prev_fx == ACTIVE_FX_PITCH;
             let had_vol_fx = prev_fx == ACTIVE_FX_FADE || prev_fx == ACTIVE_FX_TREMBLE;
 
-            let new_note = lo | hi != 0;
+            let new_note = note_idx != 0;
             if new_note {
+                let freq = self.freq(note_idx);
                 unsafe {
-                    BASE_FREQ[ch] = lo | (hi << 8);
+                    BASE_FREQ[ch] = freq;
                 }
             }
-            if vol != 0xFF {
+            let vol = vol_fx & VOL_FX_VOLUME_MASK;
+            if vol != VOL_FX_VOLUME_HOLD {
                 unsafe {
                     CUR_VOL[ch] = vol;
                 }
                 v[ch].set_volume(vol);
             }
 
+            let fx_id = (vol_fx >> VOL_FX_ID_SHIFT) & VOL_FX_ID_MASK;
             if fx_id == FX_ID_ARPEGGIO {
-                let arp_x_lo = unsafe { *data.add(base + off_fx_freq_x_lo + beat) } as u16;
-                let arp_x_hi = unsafe { *data.add(base + off_fx_freq_x_hi + beat) } as u16;
-                let arp_y_lo = unsafe { *data.add(base + off_fx_freq_y_lo + beat) } as u16;
-                let arp_y_hi = unsafe { *data.add(base + off_fx_freq_y_hi + beat) } as u16;
+                let arp_x = self.freq(fx_freq_x_idx);
+                let arp_y = self.freq(fx_freq_y_idx);
                 unsafe {
                     ACTIVE_FX[ch] = ACTIVE_FX_ARP;
-                    ARP_X_FREQ[ch] = arp_x_lo | (arp_x_hi << 8);
-                    ARP_Y_FREQ[ch] = arp_y_lo | (arp_y_hi << 8);
-                    ARP_STEP_COUNT[ch] = if fx_y == ARP_NO_THIRD_NOTE { 2 } else { 3 };
+                    ARP_X_FREQ[ch] = arp_x;
+                    ARP_Y_FREQ[ch] = arp_y;
+                    // No baked third note means a two-note arpeggio.
+                    ARP_STEP_COUNT[ch] = if fx_freq_y_idx == 0 { 2 } else { 3 };
                     ARP_STEP[ch] = 0;
                 }
-                any_active = true;
+                active |= bit;
             } else if fx_id == FX_ID_PITCH_UP || fx_id == FX_ID_PITCH_DOWN {
-                let target_lo = unsafe { *data.add(base + off_fx_freq_x_lo + beat) } as u16;
-                let target_hi = unsafe { *data.add(base + off_fx_freq_x_hi + beat) } as u16;
+                let target = self.freq(fx_freq_x_idx);
                 unsafe {
                     ACTIVE_FX[ch] = ACTIVE_FX_PITCH;
-                    PITCH_TARGET[ch] = target_lo | (target_hi << 8);
+                    PITCH_TARGET[ch] = target;
                     PITCH_CUR[ch] = BASE_FREQ[ch];
                     v[ch].set_frequency(PITCH_CUR[ch]);
                 }
-                any_active = true;
+                active |= bit;
             } else if fx_id == FX_ID_FADE_IN || fx_id == FX_ID_FADE_OUT {
                 unsafe {
                     ACTIVE_FX[ch] = ACTIVE_FX_FADE;
@@ -425,23 +468,16 @@ impl TrackSequencer {
                         FADE_CUR[ch] = CUR_VOL[ch];
                     }
                     v[ch].set_volume(FADE_CUR[ch]);
-                    VOL_FX_HOLD[ch] = fx_x;
-                    VOL_FX_COUNTER[ch] = fx_x;
+                    let fade_hold = (fx_x >> 4).max(1);
+                    VOL_FX_HOLD[ch] = fade_hold;
+                    VOL_FX_COUNTER[ch] = fade_hold;
                     if new_note || had_freq_fx {
                         v[ch].set_frequency(BASE_FREQ[ch]);
                     }
                 }
-                any_active = true;
+                active |= bit;
             } else if fx_id == FX_ID_INSTRUMENT {
-                v[ch].set_wavetable(if fx_x as usize == NOISE_INSTRUMENT {
-                    if fx_y == 0 {
-                        NOISE_SENTINEL_MODE0
-                    } else {
-                        NOISE_SENTINEL_MODE1
-                    }
-                } else {
-                    WAVETABLE[fx_x as usize]
-                });
+                v[ch].set_wavetable(WAVETABLE[fx_x as usize]);
                 unsafe {
                     ACTIVE_FX[ch] = ACTIVE_FX_NONE;
                     if new_note || had_freq_fx {
@@ -461,7 +497,7 @@ impl TrackSequencer {
                         v[ch].set_frequency(BASE_FREQ[ch]);
                     }
                 }
-                any_active = true;
+                active |= bit;
             } else {
                 unsafe {
                     ACTIVE_FX[ch] = ACTIVE_FX_NONE;
@@ -473,29 +509,33 @@ impl TrackSequencer {
                     }
                 }
             }
-            base += channel_stride;
+
+            bit <<= 1;
         }
-        self.fx_active_any = any_active;
+        self.fx_active_mask = active;
     }
 }
 
-fn mul_by_const(x: usize, mut n: usize) -> usize {
-    let mut acc = 0usize;
-    let mut shifted = x;
-    while n > 0 {
-        if n & 1 != 0 {
-            acc += shifted;
+// Entries are ordered by beat, so a miss is known as soon as a later beat turns up.
+unsafe fn find_seq_entry(entries: *const u8, count: usize, beat: u8) -> Option<*const u8> {
+    let mut entry = entries;
+    for _ in 0..count {
+        let entry_beat = unsafe { *entry };
+        if entry_beat == beat {
+            return Some(entry);
         }
-        shifted <<= 1;
-        n >>= 1;
+        if entry_beat > beat {
+            return None;
+        }
+        entry = unsafe { entry.add(SEQ_ENTRY_SIZE) };
     }
-    acc
+    None
 }
 
 unsafe fn read_u16(base: *const u8, offset: usize) -> u16 {
-    (base.add(offset) as *const u16).read_unaligned()
+    unsafe { (base.add(offset) as *const u16).read_unaligned() }
 }
 
 unsafe fn read_ptr(table: *const u16, index: usize) -> u16 {
-    table.add(index).read_unaligned()
+    unsafe { table.add(index).read_unaligned() }
 }

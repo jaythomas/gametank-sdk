@@ -1,4 +1,4 @@
-use crate::{audio::WAVETABLE, input::GenesisGamepad, scr::{BankFlags, VideoFlags}, via::Via, video_dma::{DmaManager, VideoDma, blitter::BlitterGuard, spritemem::SpriteMem}};
+use crate::{audio::{WAVETABLE, WAVETABLE_COUNT}, input::GenesisGamepad, scr::{BankFlags, VideoFlags}, via::Via, video_dma::{DmaManager, VideoDma, blitter::BlitterGuard, spritemem::SpriteMem}};
 
 /// Write-only register at $2005
 const BANK_REG: *mut u8 = 0x2005 as *mut u8;
@@ -32,9 +32,14 @@ impl AudioManager {
     /// `tables[i]` (a 256-byte raw waveform, e.g. exported by gt-tracker)
     /// is written to `WAVETABLE[i]`. Call this after [`load_firmware`](Self::load_firmware).
     pub fn load_instruments(&mut self, tables: &[[u8; 256]]) {
-        for (i, table) in tables.iter().enumerate().take(WAVETABLE.len()) {
+        for (i, table) in tables.iter().enumerate().take(WAVETABLE_COUNT) {
             let base = WAVETABLE[i] as usize;
-            self.aram[base..base + 256].copy_from_slice(table);
+            // The ISR indexes the gain tables with the raw sample, so every
+            // sample has to be a multiple of 4. Clearing the low two bits here
+            // is what lets the ISR skip an `and` per voice per sample.
+            for (dst, src) in self.aram[base..base + 256].iter_mut().zip(table.iter()) {
+                *dst = *src & 0xFC;
+            }
         }
     }
 }

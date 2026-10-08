@@ -86,19 +86,19 @@ See the [Tuning editor](#tuning-editor) for how to update these mappings.
 
 **`/~** sets Note OFF. While an empty beat carries a note, an explicit Note OFF effectively ends the note by temporarily muting the channel.
 
-**v** represents volume. Entered as a two-digit hexadecimal value from `00` to `3F` (0-63 decimal). Type 0-9/A-F to set digits or `-`/`=` to decrement/increment. The last set volume carries to the next note, even if a note OFF is set along the way.
+**v** represents volume. Entered as a two-digit hexadecimal value from `00` to `17`, where `00` is silence and `17` is full volume. The levels are spaced 1.3dB apart at the loud end, widening to 3.5dB at the quiet end so that level `01` is about -42dB and fades end smoothly, so each step is a roughly equal change by ear. Type 0-9/A-F to set the level or `-`/`=` to decrement/increment. The last set volume carries to the next note, even if a note OFF is set along the way.
 
 **Fx** lets you apply effects per channel. Effects apply at the start of the beat before the note is processed.
 
 | ID | Label       | Parameters                                               | Description                                    |
 | -- | -----       | ----------                                               | -----------                                    |
 | 0  | (no effect) |                                                          |                                                |
-| 1  | Instrument  | x (0-A) = instrument index, y (0-1) = noise channel mode | Switch which instrument this channel is using. Instrument `A` is the virtual noise channel. Similar to the noise "percussion" of the NES, mode 0 has a slow hiss and mode 1 has more crash. |
+| 1  | Instrument  | x (0-7) = instrument index                               | Switch which instrument this channel is using. |
 | 2  | Arpeggio    | x (0-F) = how many steps up to the second note,<br>y (0-F) = optional, steps up for a third note. | The arpeggiation steps to its next note once per tick, and FxSpeed sets how many ticks occur per beat. So an FxSpeed of `05` yields 3 ticks/notes a beat. |
 | 3  | PitchUp     | x (00-FF) = how many steps up to slide to                | Portamento that increments at a rate of FxSpeed. |
 | 4  | PitchDown   | x (00-FF) = how many steps down to slide to              | Portamento that decrements at a rate of FxSpeed. |
-| 5  | FadeIn      | x (00-3B) = how many ticks to hold each volume increment | Play note with a volume of 0 and raise volume up at a rate of `x` until reaching set volume or the beat ends. |
-| 6  | FadeOut     | x (00-3B) = how many ticks to hold each volume increment | Play note at the volume level set for the beat and lower volume down to 0 at a rate of `x`. |
+| 5  | FadeIn      | x (00-3B) = how many ticks to hold each volume step      | Play note with a volume of 0 and raise volume up at a rate of `x` until reaching set volume or the beat ends. |
+| 6  | FadeOut     | x (00-3B) = how many ticks to hold each volume step      | Play note at the volume level set for the beat and lower volume down to 0 at a rate of `x`. |
 | 7  | Tremble     | x (00-3B) = how many ticks to hold a note off then on    | Hard tremolo. Rapidly play and mute a note. |
 
 ## Control deck
@@ -113,7 +113,7 @@ The control deck allows you to edit global track parameters, pattern-level param
 
 **FxSpeed** is the starting effects speed for the track (see **SEQ** commands for more details).
 
-**Instruments** - there are 11 total instruments, which can be swapped out on any beat on any channel to provide a lot of versatility. The 11 instruments can be renamed from here, and their waveforms opened in the instrument editor from the `[⚙]` buttons.
+**Instruments** - there are 8 total instruments, which can be swapped out on any beat on any channel to provide a lot of versatility. The 8 instruments can be renamed from here, and their waveforms opened in the instrument editor from the `[⚙]` buttons. In a new track, instrument 6 (the one channel 6 plays by default) starts out as white noise so there is a percussion channel ready to go; the rest start as square waves.
 
 **Tuning editor** opens the [tuning editor](#tuning-editor) for key assignment.
 
@@ -137,9 +137,9 @@ Press Enter to execute or Esc to cancel the command input.
 | `:exp`/`:export` | export track                            |
 | `:instrument`    | open instrument editor                  |
 | `:m`             | toggle mute on the active voice channel |
-| `:mute`          | mute the active voice channel           |
-| `:unmute`        | unmute the active voice channel         |
+| `:mute`/`:unmute`| mute/unmute the active voice channel    |
 | `:q`/`:quit`     | quit the application                    |
+| `:s`/`:solo`     | solo the active voice channel (mutes all other channels, or unmutes all if already soloed) |
 | `:w`/`:write`    | save changes to file                    |
 
 TODO: lots more commands
@@ -205,37 +205,75 @@ Follow the instructions for your SDK on how to incorporate the track data into y
 
 ## Track descriptor reference
 
-The exported `<name>-export/<name>.bin` is made of three parts:
+The exported `<name>-export/<name>.bin` is made of four parts. Every pattern keeps
+its arrays dense so the sequencer can index straight to a beat without scanning,
+but arrays a pattern never uses are omitted entirely.
 
-**1. Header** fixed at 5 bytes, starting at offset 0.
+**1. Header** fixed at 6 bytes, starting at offset 0.
 
-| offset | type  | field           | description                                     |
-| ------ | ----  | -----           | -----------                                     |
-| 0      | `u16` | `bpm`           | Base tempo, beats per minute                    |
-| 2      | `u16` | `speed`         | FxSpeed. Track-wide number of ticks per effect  |
-| 4      | `u8`  | `pattern_count` | Number of unique patterns                       |
+| offset | type  | field           | description                                        |
+| ------ | ----  | -----           | -----------                                        |
+| 0      | `u16` | `bpm`           | Base tempo, beats per minute                       |
+| 2      | `u16` | `speed`         | FxSpeed. Track-wide number of ticks per effect     |
+| 4      | `u8`  | `pattern_count` | Number of unique patterns                          |
+| 5      | `u8`  | `freq_count`    | Number of frequency table entries, slot 0 included |
 
-**2. Patterns table** immediately follows the header at byte offset 5. It is a variable-sized array where each entry tells the location of the pattern data block for the given pattern index.
+**2. Patterns table** immediately follows the header at byte offset 6. It is a variable-sized array where each entry tells the location of the pattern data block for the given pattern index.
 
 | index                | type  | value                                                              |
 | -------------------- | ----  | -----                                                              |
 | 0                    | `u16` | Offset from the start of the file to pattern 0's data block        |
-| 1                    | `u16` | Offset from the start of the file to pattern 1's data block (i.e. pattern 0's offset + pattern 0's `pattern_size`) |
+| 1                    | `u16` | Offset from the start of the file to pattern 1's data block        |
 | ...                  | ...   | ...                                                                |
 | `pattern_count - 1`  | `u16` | Offset from the start of the file to the last pattern's data block |
 
-**3. Pattern data blocks**, one per table entry above. Located at the offset given by that entry. Each block is laid out as:
+**3. Frequency table** follows the patterns table at byte offset `6 + pattern_count * 2`. A track rarely uses more than a few dozen distinct pitches, so each one is stored once here and referenced by a one-byte index everywhere else.
+
+| index              | type  | value                                                    |
+| ------------------ | ----  | -----                                                    |
+| 0                  | `u16` | Reserved, always `0x0000`. An index of 0 means "no note" |
+| 1 ...              | `u16` | 16-bit phase increment for one distinct pitch            |
+
+Exporting fails if a track needs more than 255 distinct frequencies.
+
+**4. Pattern data blocks**, one per patterns table entry. Located at the offset given by that entry. Each block starts with a 3-byte header:
+
+| offset | type | field          | description                                                                            |
+| ------ | ---- | -----          | -----------                                                                            |
+| 0      | `u8` | `beats`        | Row count for this pattern                                                             |
+| 1      | `u8` | `channel_mask` | Bits 0-6 mark channels that have arrays in this block. Bit 7 (`0x80`) marks a seq list |
+| 2      | `u8` | `fx_mask`      | Bits 0-6 mark channels that also carry the three effect arrays                         |
+
+A channel whose `channel_mask` bit is clear reads as silent for the whole pattern,
+which still ends any effect a previous pattern left running.
+
+If `channel_mask` bit 7 is set, a sequence command list follows the header. Commands
+are sparse, so only beats that carry one are stored, in ascending beat order:
 
 ```
-[0] beats: u8 (row count for this pattern)
-per channel, each array sized to `beats` bytes:
-  freq_lo[beats], freq_hi[beats]   16-bit phase increment; 0x0000 holds the previous note
-  vol[beats]                       0-63, or 0xFF to hold the previous volume
-  fx_id[beats]                     equal to the channel effect ID (see channel FX definitions above); 0 = no effect
-  fx_x[beats], fx_y[beats]         raw effect parameters (scale-degree offsets for Arpeggio/PitchUp/PitchDown)
-  fx_freq_x_lo/hi[beats]           baked target frequency for fx_x (Arpeggio's +x note, or PitchUp/PitchDown's slide target)
-  fx_freq_y_lo/hi[beats]           baked +y scale-degree frequency (Arpeggio only)
-  seq_cmd_type[beats]              equal to the sequence command ID (see SEQ definitions above); 0 = no command
-  seq_cmd_value[beats]             raw command value (unused for Stop; pattern index for CountJump)
-  seq_cmd_value2[beats]            second raw command value (only used for CountJump: target beat)
+seq_count: u8
+seq_count entries of 4 bytes each:
+  beat    sequence command's beat index within the pattern
+  cmd     sequence command ID (see SEQ definitions above)
+  value   raw command value (unused for Stop; pattern index for Jump/CountJump)
+  value2  second raw command value (target beat for Jump/CountJump)
 ```
+
+The channel arrays come last, one group per channel flagged in `channel_mask`, in
+ascending channel order. Each array is `beats` bytes long:
+
+```
+note_idx[beats]       frequency table index for the beat's note; 0 = no note
+vol_fx[beats]         packed volume and effect ID, see below
+only when the channel's fx_mask bit is set:
+  fx_x[beats]           raw effect parameter (instrument slot, or fade/tremble hold ticks)
+  fx_freq_x_idx[beats]  frequency table index for the baked fx_x target (Arpeggio's +x note, or PitchUp/PitchDown's slide target)
+  fx_freq_y_idx[beats]  frequency table index for Arpeggio's +y note; 0 = two-note arpeggio
+```
+
+`vol_fx` packs both per-beat values a channel almost always needs into one byte:
+
+| bits  | field       | description                                                             |
+| ----- | -----       | -----------                                                             |
+| 0-4   | `volume`    | Volume 0-23; 31 means hold the channel's previous volume                |
+| 5-7   | `fx_id`     | Channel effect ID 1-7 (see channel FX definitions above); 0 = no effect |

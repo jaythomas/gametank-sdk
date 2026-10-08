@@ -54,10 +54,10 @@ cargo +mos build --release
 One of the two audio firmwares is selected at build time via Cargo
 features on the `rom` crate:
 
-| cargo feature               | firmware                  | description                 |
-| ----------------------------| ------------------------- | --------------------------- |
-| `audio-fm-4ch`              | 4-channel FM synth        | ADSR envelopes per operator |
-| `audio-wavetable` (default) | 7-channel wavetable synth | volume 0-63                 |
+| cargo feature               | firmware                  | description                           |
+| -------------               | --------                  | -----------                           |
+| `audio-fm-4ch`              | 4-channel FM synth        | ADSR envelopes per operator           |
+| `audio-wavetable` (default) | 7-channel wavetable synth | 256-byte waves, 24-bit volume control |
 
 Build with a specific backend using `--no-default-features --features <name>`:
 
@@ -97,17 +97,18 @@ use gametank::audio::{FIRMWARE, TrackSequencer};
 
 const MY_MELODY_BANK: u8 = 123;
 
-#[unsafe(link_section = ".rodata.bank123")]
-static MY_MELODY: [u8; 12211] = *include_bytes!("../assets/my_melody.bin");
+// Re-exporting a track changes its size, so let the macro read the length
+// from the file rather than hardcoding a byte count.
+gametank::include_asset!(static MY_MELODY, ".rodata.bank123", "../assets/my_melody.bin");
 
 fn main(console: &mut Console) {
     console.audio.load_firmware(FIRMWARE);
 
     let mut sequencer = TrackSequencer::new(
-      console,
-      MY_MELODY.as_ptr()
-      MY_MELODY_BANK,
-      126
+        console,
+        MY_MELODY.as_ptr()
+        MY_MELODY_BANK,
+        126
     );
     // Load instruments into RAM then (re-)activate the bank for blitter
     sequencer.init_voices(console, 126);
@@ -173,8 +174,8 @@ assembly and the corresponding Rust-side offsets/array sizes in
 ### Firmware technical details
 
 The GameTank has a dedicated [Audio CoProcessor (ACP)](https://wiki.gametank.zone/doku.php?id=hardware:audio),
-a second 6502-family CPU that runs its own small firmware image independently of the main CPU,
-at a fixed ~14 kHz sample rate, producing a single bipolar 8-bit sample per tick on a DAC.
+a second 6502-family CPU that runs its own small firmware image independently of the main
+CPU at a fixed sample rate, producing a single bipolar 8-bit sample per tick on a DAC.
 The main CPU controls it through a few memory-mapped registers:
 
 | Address | Register | Purpose |

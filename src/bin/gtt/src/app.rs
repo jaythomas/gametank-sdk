@@ -413,6 +413,19 @@ impl App {
                         }
                     }
                 }
+                ComponentAction::SoloChannel => {
+                    if let Some(ch) = self.tracker_container.active_channel() {
+                        self.tracker_container.solo_channel(ch);
+                        if let Some(player) = &self.player {
+                            for c in 0..self.tracker_container.channel_count() {
+                                player.set_channel_muted(
+                                    c,
+                                    self.tracker_container.is_channel_muted(c),
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         Ok(false)

@@ -1,17 +1,23 @@
+/* Every one of the 4KB's sixteen pages is spoken for. The hardware stack is
+ * not among them: the ISR masks interrupts for good and never pushes - no
+ * JSR, no interrupt is ever taken - so page 1 holds gain tables instead. */
 MEMORY {
-  /* 0.5k reserved for zp + hw stack */
   RESERVED (rw)  : ORIGIN = 0x0000, LENGTH = 0x0041
-  ZP (rw)        : ORIGIN = 0x0041, LENGTH = 0x00C0
-  STACK (rw)     : ORIGIN = 0x0100, LENGTH = 0x0100 
+  ZP (rw)        : ORIGIN = 0x0041, LENGTH = 0x00BF
 
-  /* 256 bytes for volume table (half-amplitude sine for vol_table[s-v] - vol_table[s+v]) */
-  VOL (rwx)      : ORIGIN = 0x0200, LENGTH = 0x0100
+  /* 1.5k of gain tables: 24 volume levels x 64 entries, interleaved four to a
+   * 256-byte block, see gen_gain_tables.js. Blocks are 256-byte aligned so the
+   * ISR's `lda gain,y` never crosses a page boundary and therefore never
+   * costs a penalty cycle. */
+  GAIN (rwx)     : ORIGIN = 0x0100, LENGTH = 0x0600
 
-  /* 2.5k for 10 wavetables */
-  WAVE (rwx)     : ORIGIN = 0x0300, LENGTH = 0x0A00
-  
-  /* ~750 bytes for program + stack headroom, up to the vector table. */
-  ARAM (rwx)     : ORIGIN = 0x0D00, LENGTH = 0x02FA
+  /* 2k for 8 wavetables */
+  WAVE (rwx)     : ORIGIN = 0x0700, LENGTH = 0x0800
+
+  /* The program shares the vector table's page, which is the only space left
+   * once the gain and wavetable pages are placed. It fits in 244 of these 250
+   * bytes, so there is very little room to grow. */
+  ARAM (rwx)     : ORIGIN = 0x0F00, LENGTH = 0x00FA
   VECTOR_TABLE(rw): ORIGIN = 0x0FFA, LENGTH = 6
 
   SAMPLE (w)     : ORIGIN = 0x8000, LENGTH = 0x8000
@@ -20,7 +26,7 @@ MEMORY {
 SECTIONS {
   .header : { . = 0x0000; BYTE(0); } > RESERVED
   .text : { *(.text*) } > ARAM = 0xFF
-  .volume : { KEEP(*(.const.vol*)) } > VOL
+  .gain : { KEEP(*(.const.gain*)) } > GAIN
   .wave : { KEEP(*(.const.wavetables*)) } > WAVE
   
   .rodata : { *(.rodata*) } > ARAM
@@ -30,13 +36,13 @@ SECTIONS {
   .zp : { 
     __zp_start = .;
 
-    /* put .data.voices at zp 0x41, should take 81 bytes - should take us to =0xA1 */
+    /* put .data.voices at zp 0x41, 7 voices x 2 bytes - takes us to 0x4F */
     . = 0x0041;
     __voices_start = .;
     KEEP(*(.data.voices))
     __voices_end = .;
     KEEP(*(.data.zp))
-    
+
     __zp_end = .;
   } > ZP
   .data : { __data_start = .; *(.data*) __data_end = .; } > ARAM

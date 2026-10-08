@@ -129,7 +129,7 @@
 //! // Play notes using the wavetable synth
 //! let v = voices();
 //! v[0].set_note(MidiNote::C4);
-//! v[0].set_volume(63);
+//! v[0].set_volume(15);
 //! v[0].set_wavetable(WAVETABLE[0]);
 //! ```
 //!
@@ -159,6 +159,23 @@
 //! | Sprite RAM | 512KB (8 pages × 256×256) |
 //! | ROM | 2MB (128 × 16KB banks) |
 //! | Audio | 6502 coprocessor, 8-bit DAC, ~14kHz |
+
+/// Places a binary asset in a ROM bank, sizing the array from the file itself.
+///
+/// Assets such as gt-tracker tracks change size whenever they are re-exported,
+/// so writing the byte count by hand turns every edit into a build error.
+///
+/// ```ignore
+/// gametank::include_asset!(static MY_MELODY, ".rodata.bank123", "../assets/my_melody.bin");
+/// ```
+#[macro_export]
+macro_rules! include_asset {
+    ($vis:vis static $name:ident, $section:literal, $path:literal) => {
+        #[unsafe(link_section = $section)]
+        $vis static $name: [u8; ::core::include_bytes!($path).len()] =
+            *::core::include_bytes!($path);
+    };
+}
 
 pub mod blitter;
 pub mod scr;

@@ -39,13 +39,3 @@ instrument7_table:
 instrument8_table:
     .incbin "../../instruments/sine.raw"
 
-.align 256
-.global instrument9_table
-instrument9_table:
-    .incbin "../../instruments/sine.raw"
-
-.align 256
-.global instrument10_table
-instrument10_table:
-    .incbin "../../instruments/sine.raw"
-

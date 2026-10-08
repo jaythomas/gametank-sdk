@@ -28,4 +28,5 @@ pub enum ComponentAction {
     MuteChannel,
     UnmuteChannel,
     ToggleMuteChannel,
+    SoloChannel,
 }

@@ -9,7 +9,7 @@ macro_rules! instrument_table {
             // gt-tracker's exported `instruments/` folder
             "../../../assets/instruments/instrument_",
             $n,
-            ".raw"
+            ".bin"
         ))
     };
 }

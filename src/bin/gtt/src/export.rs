@@ -399,7 +399,7 @@ pub fn export_all(
     std::fs::create_dir_all(&instruments_dir)?;
 
     for i in 0..NUM_INSTRUMENTS {
-        let path = instruments_dir.join(format!("instrument_{}.raw", i));
+        let path = instruments_dir.join(format!("instrument_{}.bin", i));
         std::fs::write(path, &file.instruments[i].waveform)?;
     }
 

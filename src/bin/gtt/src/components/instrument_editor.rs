@@ -183,10 +183,10 @@ impl Component for InstrumentEditor {
                     if self.import_button.area.contains(pos) {
                         self.import_error = None;
                         self.file_picker.open(
-                            " Select .raw file ",
+                            " Select .bin file ",
                             SCHEME.orange[2],
                             SCHEME.true_dark_color(SCHEME.black[2]),
-                            "raw",
+                            "bin",
                         );
                     } else if self.cancel_button.area.contains(pos) {
                         self.visible = false;

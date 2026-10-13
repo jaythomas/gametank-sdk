@@ -150,6 +150,20 @@
               && echo "rust-mos: linked as 'mos' toolchain (${rust-mos})" \
               || echo "rust-mos: 'mos' toolchain already linked"
 
+            # If the stable toolchain's linker wrapper points at a
+            # garbage-collected nix store path, fall back to bfd for host
+            # builds only, leaving the mos target's own linker flags alone.
+            host_triple="$(rustc -vV | sed -n 's/^host: //p')"
+            ld_wrapper="$HOME/.rustup/toolchains/stable-$host_triple/lib/rustlib/$host_triple/bin/gcc-ld/ld.lld"
+            if [ -f "$ld_wrapper" ]; then
+              wrapped_path="$(grep -o '/nix/store/[^"]*' "$ld_wrapper" | head -1)"
+              if [ -n "$wrapped_path" ] && [ ! -e "$wrapped_path" ]; then
+                env_var="CARGO_TARGET_$(echo "$host_triple" | tr '[:lower:]-' '[:upper:]_')_RUSTFLAGS"
+                export "$env_var=-Clink-arg=-fuse-ld=bfd"
+                echo "stable toolchain's linker wrapper is stale ($wrapped_path); forcing bfd via \$$env_var"
+              fi
+            fi
+
             echo ""
             echo "Build ROM with the commands:"
             echo "cargo +mos build --release"

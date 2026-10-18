@@ -39,6 +39,36 @@ const FREQ_MIN: f64 = 7.0;
 const FREQ_MAX: f64 = 4200.0;
 const REPEAT_NUM_PIVOT_HZ: f64 = 510.0;
 const REPEAT_NUM_PIVOT: i32 = 5;
+const REFERENCE_BASE_FREQ: f64 = 440.0;
+
+fn find_pivot_unison_degree(log_period: f64, period_ratio: f64, ratios: &[f64], n: usize) -> (i32, usize) {
+    let start_unison =
+        ((FREQ_MIN / REFERENCE_BASE_FREQ).ln() / log_period).floor() as i32 - 1;
+    let end_unison = ((FREQ_MAX / REFERENCE_BASE_FREQ).ln() / log_period).ceil() as i32 + 1;
+
+    let mut rows: Vec<(f64, i32, usize)> = Vec::new();
+    for unison in start_unison..=end_unison {
+        for degree in 0..n {
+            let mut freq = REFERENCE_BASE_FREQ * period_ratio.powi(unison);
+            if degree > 0 {
+                freq *= ratios[degree - 1];
+            }
+            if (FREQ_MIN..=FREQ_MAX).contains(&freq) {
+                rows.push((freq, unison, degree));
+            }
+        }
+    }
+    rows.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.2.cmp(&b.2))
+    });
+
+    rows.iter()
+        .find(|(freq, ..)| *freq > REPEAT_NUM_PIVOT_HZ)
+        .map(|(_, unison, degree)| (*unison, *degree))
+        .unwrap_or((0, 0))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntryCol {
@@ -386,7 +416,7 @@ impl TuningEditor {
         let start_unison = ((FREQ_MIN / self.base_freq).ln() / log_period).floor() as i32 - 1;
         let end_unison = ((FREQ_MAX / self.base_freq).ln() / log_period).ceil() as i32 + 1;
 
-        let mut rows: Vec<(String, f64, usize)> = Vec::new();
+        let mut rows: Vec<(String, f64, usize, i32)> = Vec::new();
 
         for unison in start_unison..=end_unison {
             for degree in 0..n {
@@ -400,7 +430,7 @@ impl TuningEditor {
                     } else {
                         names[degree - 1].clone()
                     };
-                    rows.push((name, freq, degree));
+                    rows.push((name, freq, degree, unison));
                 }
             }
         }
@@ -411,16 +441,13 @@ impl TuningEditor {
                 .then(a.2.cmp(&b.2))
         });
 
-        let n_i32 = n as i32;
-        let pivot = rows
-            .iter()
-            .position(|(_, freq, _)| *freq > REPEAT_NUM_PIVOT_HZ)
-            .unwrap_or(rows.len()) as i32;
+        let (pivot_unison, pivot_degree) = find_pivot_unison_degree(log_period, period_ratio, &ratios, n);
+
         self.freq_rows = rows
             .into_iter()
-            .enumerate()
-            .map(|(j, (name, freq, _))| {
-                let repeat_num = REPEAT_NUM_PIVOT + (j as i32 - pivot).div_euclid(n_i32);
+            .map(|(name, freq, degree, unison)| {
+                let repeat_num = REPEAT_NUM_PIVOT + (unison - pivot_unison)
+                    - if degree < pivot_degree { 1 } else { 0 };
                 let display_name = format!("{}{}", name, repeat_num);
                 let osc_val = hz_to_inc_q16((freq * 65536.0).round() as u32);
                 (display_name, freq, osc_val)

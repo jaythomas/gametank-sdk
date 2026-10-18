@@ -168,6 +168,14 @@ impl Component for TrackerContainer {
                     }
                     self.active_focus = self.active_focus.next();
                 }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char(' '),
+                    kind: KeyEventKind::Press,
+                    ..
+                }) if !(self.active_focus == AppFocus::ControlDeck && self.control_deck.editing) =>
+                {
+                    actions_out.push(ComponentAction::Play);
+                }
                 Event::Mouse(_) => mouse_pass.push(e),
                 _ => keyboard_pass.push(e),
             }

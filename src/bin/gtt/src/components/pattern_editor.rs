@@ -842,7 +842,7 @@ impl Component for PatternEditor {
                 for event in &events {
                     match event {
                         Event::Key(KeyEvent {
-                            code: KeyCode::Enter | KeyCode::Char(' '),
+                            code: KeyCode::Enter,
                             kind: KeyEventKind::Press,
                             ..
                         }) => {
@@ -1173,10 +1173,7 @@ impl PatternEditor {
 impl PatternEditor {
     pub fn on_mouse_event(&mut self, event: &Event) -> bool {
         let Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column,
-            row,
-            ..
+            kind, column, row, ..
         }) = event
         else {
             return false;
@@ -1190,24 +1187,51 @@ impl PatternEditor {
             return false;
         }
 
-        if self.view_layout.table.contains(pos) {
-            let header_bottom = self.view_layout.table.y + 1;
-            if pos.y >= header_bottom {
-                let clicked_row = (pos.y - header_bottom) as usize + self.view_layout.scroll;
-                self.sel_y = clicked_row.min(self.beats.saturating_sub(1) as usize) as u8;
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.view_layout.table.contains(pos) {
+                    let header_bottom = self.view_layout.table.y + 1;
+                    if pos.y >= header_bottom {
+                        let clicked_row =
+                            (pos.y - header_bottom) as usize + self.view_layout.scroll;
+                        self.sel_y = clicked_row.min(self.beats.saturating_sub(1) as usize) as u8;
 
-                let mut col_x = self.view_layout.table.x;
-                for (i, lane) in self.lanes.iter().enumerate() {
-                    if pos.x >= col_x && pos.x < col_x + lane.width {
-                        self.sel_x = i as u8;
-                        break;
+                        let mut col_x = self.view_layout.table.x;
+                        for (i, lane) in self.lanes.iter().enumerate() {
+                            if pos.x >= col_x && pos.x < col_x + lane.width {
+                                self.sel_x = i as u8;
+                                break;
+                            }
+                            col_x += lane.width;
+                        }
                     }
-                    col_x += lane.width;
                 }
+                true
             }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if !self.playing && !self.seq_choice.is_popup_active() =>
+            {
+                if *kind == MouseEventKind::ScrollUp {
+                    self.sel_y = if self.sel_y == 0 {
+                        self.beats.saturating_sub(1)
+                    } else {
+                        self.sel_y - 1
+                    };
+                } else {
+                    self.sel_y = if self.sel_y + 1 >= self.beats {
+                        0
+                    } else {
+                        self.sel_y + 1
+                    };
+                }
+                self.vol_edit = None;
+                self.fx_edit = None;
+                self.seq_edit = None;
+                self.seq_choice_cell = None;
+                true
+            }
+            _ => false,
         }
-
-        true
     }
 }
 

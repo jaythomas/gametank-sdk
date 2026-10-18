@@ -209,7 +209,7 @@ pub struct ControlDeck {
     fx_speed_minus: ButtonState,
     fx_speed_plus: ButtonState,
     fx_speed_snapshot: String,
-    editing: bool,
+    pub editing: bool,
     instruments: [InstrumentEntry; NUM_INSTRUMENTS],
     pub playing: bool,
     rows_input: TextInputState,

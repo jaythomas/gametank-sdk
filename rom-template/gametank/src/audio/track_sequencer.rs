@@ -55,6 +55,10 @@ pub struct TrackSequencer {
     pattern_count: u8,
     flow_count: u8,
     stopped: bool,
+    // Set once the first beat has been triggered, so `tick` can prime beat 0
+    // immediately instead of waiting a full beat-length at the track's
+    // starting tempo before anything plays.
+    primed: bool,
     // One bit per channel with an effect still running. Sub-beat ticks are
     // skipped entirely while it is zero, and each effect clears its own bit as
     // soon as it finishes rather than waiting for the next beat.
@@ -155,6 +159,7 @@ impl TrackSequencer {
             pattern_count,
             flow_count: 0,
             stopped: false,
+            primed: false,
             fx_active_mask: 0,
             freq_table,
         }
@@ -182,6 +187,16 @@ impl TrackSequencer {
     pub fn tick(&mut self, console: &mut Console, restore_bank: u8) {
         if self.stopped {
             return;
+        }
+
+        if !self.primed {
+            self.primed = true;
+            console.set_rom_bank(self.track_bank);
+            self.advance_beat();
+            console.set_rom_bank(restore_bank);
+            if self.stopped {
+                return;
+            }
         }
 
         self.frame_acc += self.bpm;
@@ -265,7 +280,13 @@ impl TrackSequencer {
                     if VOL_FX_COUNTER[ch] == 0 {
                         let cur = FADE_CUR[ch];
                         let target = FADE_TARGET[ch];
-                        let next = if cur < target { cur + 1 } else { cur - 1 };
+                        let next = if cur < target {
+                            cur + 1
+                        } else if cur > target {
+                            cur - 1
+                        } else {
+                            cur
+                        };
                         FADE_CUR[ch] = next;
                         v[ch].set_volume(next);
                         if next == target {
@@ -459,23 +480,28 @@ impl TrackSequencer {
                 active |= bit;
             } else if fx_id == FX_ID_FADE_IN || fx_id == FX_ID_FADE_OUT {
                 unsafe {
-                    ACTIVE_FX[ch] = ACTIVE_FX_FADE;
-                    if fx_id == FX_ID_FADE_IN {
-                        FADE_TARGET[ch] = CUR_VOL[ch];
-                        FADE_CUR[ch] = 0;
+                    if CUR_VOL[ch] == 0 {
+                        ACTIVE_FX[ch] = ACTIVE_FX_NONE;
+                        v[ch].set_volume(0);
                     } else {
-                        FADE_TARGET[ch] = 0;
-                        FADE_CUR[ch] = CUR_VOL[ch];
+                        ACTIVE_FX[ch] = ACTIVE_FX_FADE;
+                        if fx_id == FX_ID_FADE_IN {
+                            FADE_TARGET[ch] = CUR_VOL[ch];
+                            FADE_CUR[ch] = 0;
+                        } else {
+                            FADE_TARGET[ch] = 0;
+                            FADE_CUR[ch] = CUR_VOL[ch];
+                        }
+                        v[ch].set_volume(FADE_CUR[ch]);
+                        let fade_hold = (fx_x >> 4).max(1);
+                        VOL_FX_HOLD[ch] = fade_hold;
+                        VOL_FX_COUNTER[ch] = fade_hold;
+                        active |= bit;
                     }
-                    v[ch].set_volume(FADE_CUR[ch]);
-                    let fade_hold = (fx_x >> 4).max(1);
-                    VOL_FX_HOLD[ch] = fade_hold;
-                    VOL_FX_COUNTER[ch] = fade_hold;
                     if new_note || had_freq_fx {
                         v[ch].set_frequency(BASE_FREQ[ch]);
                     }
                 }
-                active |= bit;
             } else if fx_id == FX_ID_INSTRUMENT {
                 v[ch].set_wavetable(WAVETABLE[fx_x as usize]);
                 unsafe {

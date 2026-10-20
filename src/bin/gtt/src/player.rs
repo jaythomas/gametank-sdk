@@ -237,14 +237,14 @@ impl PlayerInner {
                         pattern_idx.min(self.patterns.len().saturating_sub(1));
                     self.current_row = row;
                     self.flow_count = 0;
-                    self.samples_until_next_beat = self.samples_per_beat;
-                    self.samples_until_next_tick = self.samples_per_tick;
                     self.tick_count = 0;
                     self.rebuild_channel_state(self.current_pattern_idx, row);
                     for ch in 0..AUDIO_CHANNELS {
                         self.set_voice_volume(ch, if self.muted[ch] { 0 } else { self.remembered_vol[ch] });
                     }
                     self.trigger_row();
+                    self.samples_until_next_beat = self.samples_per_beat;
+                    self.samples_until_next_tick = self.samples_per_tick;
                     self.current_row_out.store(self.current_row, Ordering::Relaxed);
                     self.current_pattern_out
                         .store(self.current_pattern_idx, Ordering::Relaxed);
@@ -551,23 +551,35 @@ impl PlayerInner {
 
             let cur_effective_vol = if self.muted[ch] { 0 } else { self.remembered_vol[ch] };
             if let Some(x) = maybe_fade_in {
-                self.fade_active[ch] = true;
-                self.tremble_active[ch] = false;
-                self.fade_target[ch] = cur_effective_vol;
-                self.fade_cur[ch] = 0;
-                let fade_hold = (x >> 4).max(1);
-                self.vol_fx_hold[ch] = fade_hold;
-                self.vol_fx_counter[ch] = fade_hold;
-                self.set_voice_volume(ch, self.fade_cur[ch]);
+                if cur_effective_vol == 0 {
+                    self.fade_active[ch] = false;
+                    self.tremble_active[ch] = false;
+                    self.set_voice_volume(ch, 0);
+                } else {
+                    self.fade_active[ch] = true;
+                    self.tremble_active[ch] = false;
+                    self.fade_target[ch] = cur_effective_vol;
+                    self.fade_cur[ch] = 0;
+                    let fade_hold = (x >> 4).max(1);
+                    self.vol_fx_hold[ch] = fade_hold;
+                    self.vol_fx_counter[ch] = fade_hold;
+                    self.set_voice_volume(ch, self.fade_cur[ch]);
+                }
             } else if let Some(x) = maybe_fade_out {
-                self.fade_active[ch] = true;
-                self.tremble_active[ch] = false;
-                self.fade_target[ch] = 0;
-                self.fade_cur[ch] = cur_effective_vol;
-                let fade_hold = (x >> 4).max(1);
-                self.vol_fx_hold[ch] = fade_hold;
-                self.vol_fx_counter[ch] = fade_hold;
-                self.set_voice_volume(ch, self.fade_cur[ch]);
+                if cur_effective_vol == 0 {
+                    self.fade_active[ch] = false;
+                    self.tremble_active[ch] = false;
+                    self.set_voice_volume(ch, 0);
+                } else {
+                    self.fade_active[ch] = true;
+                    self.tremble_active[ch] = false;
+                    self.fade_target[ch] = 0;
+                    self.fade_cur[ch] = cur_effective_vol;
+                    let fade_hold = (x >> 4).max(1);
+                    self.vol_fx_hold[ch] = fade_hold;
+                    self.vol_fx_counter[ch] = fade_hold;
+                    self.set_voice_volume(ch, self.fade_cur[ch]);
+                }
             } else if let Some(x) = maybe_tremble {
                 self.fade_active[ch] = false;
                 self.tremble_active[ch] = true;
@@ -701,7 +713,11 @@ impl PlayerInner {
                 if self.vol_fx_counter[ch] == 0 {
                     let cur = self.fade_cur[ch];
                     let target = self.fade_target[ch];
-                    let next = if cur < target { cur + 1 } else { cur - 1 };
+                    let next = match cur.cmp(&target) {
+                        std::cmp::Ordering::Less => cur + 1,
+                        std::cmp::Ordering::Greater => cur - 1,
+                        std::cmp::Ordering::Equal => cur,
+                    };
                     self.fade_cur[ch] = next;
                     self.set_voice_volume(ch, next);
                     if next == target {
@@ -777,12 +793,12 @@ impl PlayerInner {
 
             self.samples_until_next_beat -= 1.0;
             if self.samples_until_next_beat <= 0.0 {
-                self.samples_until_next_beat += self.samples_per_beat;
                 let beats = self.pattern_beats(self.current_pattern_idx);
                 self.current_row = (self.current_row + 1) % beats.max(1);
-                self.samples_until_next_tick = self.samples_per_tick.max(1.0);
                 self.tick_count = 0;
                 self.trigger_row();
+                self.samples_until_next_beat += self.samples_per_beat;
+                self.samples_until_next_tick = self.samples_per_tick.max(1.0);
                 self.current_row_out
                     .store(self.current_row, Ordering::Relaxed);
                 self.current_pattern_out

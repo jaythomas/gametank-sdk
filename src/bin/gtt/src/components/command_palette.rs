@@ -32,6 +32,7 @@ impl CommandPalette {
         match self.input.value::<String>().trim() {
             "exp" | "export" => actions.push(ComponentAction::Export),
             "instrument" => actions.push(ComponentAction::OpenInstrumentEditor(0)),
+            "envelope" => actions.push(ComponentAction::OpenEnvelopeEditor(0)),
             "q" | "quit" => actions.push(ComponentAction::Quit),
             "w" | "write" => actions.push(ComponentAction::SaveFile),
             "wq" | "write-quit" => actions.push(ComponentAction::SaveAndQuit),

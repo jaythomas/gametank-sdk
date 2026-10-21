@@ -10,8 +10,9 @@ use gte_w65c02s::W65C02S;
 use indexmap::IndexMap;
 
 use crate::file::NUM_INSTRUMENTS;
-use crate::tracker::{MAX_VOLUME, VOLUME_LEVELS};
+use crate::tracker::{MAX_VOLUME, NUM_ENVELOPES, VOLUME_LEVELS, envelope_slot};
 use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
+use crate::volume_scale::{SCALE_STRIDE, scale_table};
 
 const FIRMWARE: &[u8; 4096] =
     include_bytes!("../../../../rom-template/gametank/audiofw/wavetable.bin");
@@ -75,6 +76,7 @@ pub enum PlayerCmd {
     SetFxSpeed(u8),
     UpdatePatterns(Vec<Pattern>, Vec<u8>),
     UpdateWaveform(usize, Box<[u8; 256]>),
+    UpdateEnvelopes(Vec<Vec<u8>>),
     UpdateTuningNotes(IndexMap<String, f64>),
     SetChannelMuted(usize, bool),
 }
@@ -123,13 +125,14 @@ struct PlayerInner {
     pitch_active: [bool; AUDIO_CHANNELS],
     pitch_target: [u16; AUDIO_CHANNELS],
     pitch_cur: [u16; AUDIO_CHANNELS],
-    fade_active: [bool; AUDIO_CHANNELS],
-    fade_target: [u8; AUDIO_CHANNELS],
-    fade_cur: [u8; AUDIO_CHANNELS],
-    vol_fx_hold: [u8; AUDIO_CHANNELS],
-    vol_fx_counter: [u8; AUDIO_CHANNELS],
-    tremble_active: [bool; AUDIO_CHANNELS],
-    tremble_muted: [bool; AUDIO_CHANNELS],
+    envelopes: Vec<Vec<u8>>,
+    volume_scale: Vec<u8>,
+    env_slot: [Option<usize>; AUDIO_CHANNELS],
+    env_step: [usize; AUDIO_CHANNELS],
+    env_running: [bool; AUDIO_CHANNELS],
+    env_suppressed: [bool; AUDIO_CHANNELS],
+    samples_per_env_step: [f64; AUDIO_CHANNELS],
+    samples_until_env_step: [f64; AUDIO_CHANNELS],
     cur_note_name: [Option<String>; AUDIO_CHANNELS],
 }
 
@@ -160,7 +163,7 @@ impl PlayerInner {
         let acp_sample_rate = crate::sample_rate::sample_rate_reg_to_hz(sample_rate_reg);
         let audio_out = GameTankAudio::new(acp_sample_rate, output_sample_rate);
 
-        let samples_per_beat = output_sample_rate * 30.0 / (bpm.max(1) as f64);
+        let samples_per_beat = output_sample_rate * 60.0 / (bpm.max(1) as f64);
         let fx_speed: u8 = 6;
         let samples_per_tick = samples_per_beat / fx_speed.max(1) as f64;
 
@@ -205,13 +208,14 @@ impl PlayerInner {
             pitch_active: [false; AUDIO_CHANNELS],
             pitch_target: [0; AUDIO_CHANNELS],
             pitch_cur: [0; AUDIO_CHANNELS],
-            fade_active: [false; AUDIO_CHANNELS],
-            fade_target: [0; AUDIO_CHANNELS],
-            fade_cur: [0; AUDIO_CHANNELS],
-            vol_fx_hold: [0; AUDIO_CHANNELS],
-            vol_fx_counter: [0; AUDIO_CHANNELS],
-            tremble_active: [false; AUDIO_CHANNELS],
-            tremble_muted: [false; AUDIO_CHANNELS],
+            envelopes: vec![vec![MAX_VOLUME]; NUM_ENVELOPES],
+            volume_scale: scale_table(),
+            env_slot: [None; AUDIO_CHANNELS],
+            env_step: [0; AUDIO_CHANNELS],
+            env_running: [false; AUDIO_CHANNELS],
+            env_suppressed: [false; AUDIO_CHANNELS],
+            samples_per_env_step: [0.0; AUDIO_CHANNELS],
+            samples_until_env_step: [0.0; AUDIO_CHANNELS],
             cur_note_name: std::array::from_fn(|_| None),
         }
     }
@@ -263,7 +267,7 @@ impl PlayerInner {
                 }
                 PlayerCmd::SetBpm(bpm) => {
                     self.bpm = bpm;
-                    self.samples_per_beat = self.output_sample_rate * 30.0 / (bpm.max(1) as f64);
+                    self.samples_per_beat = self.output_sample_rate * 60.0 / (bpm.max(1) as f64);
                     self.recompute_tick_timing();
                 }
                 PlayerCmd::SetFxSpeed(fx_speed) => {
@@ -282,6 +286,12 @@ impl PlayerInner {
                 PlayerCmd::UpdateWaveform(idx, wf) => {
                     if idx < NUM_INSTRUMENTS {
                         self.write_waveform(idx, &wf);
+                    }
+                }
+                PlayerCmd::UpdateEnvelopes(envelopes) => {
+                    self.envelopes = envelopes;
+                    for ch in 0..AUDIO_CHANNELS {
+                        self.env_running[ch] = false;
                     }
                 }
                 PlayerCmd::UpdateTuningNotes(notes) => {
@@ -343,25 +353,82 @@ impl PlayerInner {
         }
     }
 
+    fn envelope_steps(&self, slot: usize) -> &[u8] {
+        match self.envelopes.get(slot) {
+            Some(steps) if !steps.is_empty() => steps.as_slice(),
+            _ => &[MAX_VOLUME],
+        }
+    }
+
+    fn scaled_volume(&self, ch: usize, step_level: u8) -> u8 {
+        let row = (self.remembered_vol[ch].min(MAX_VOLUME) as usize) * SCALE_STRIDE;
+        self.volume_scale
+            .get(row + step_level.min(MAX_VOLUME) as usize)
+            .copied()
+            .unwrap_or(self.remembered_vol[ch])
+    }
+
+    fn envelope_is_driving(&self, ch: usize) -> bool {
+        self.env_slot[ch].is_some() && !self.env_suppressed[ch] && !self.muted[ch]
+    }
+
     fn current_channel_volume(&self, ch: usize) -> u8 {
         if self.muted[ch] {
             0
-        } else if self.fade_active[ch] {
-            self.fade_cur[ch]
-        } else if self.tremble_active[ch] && self.tremble_muted[ch] {
-            0
+        } else if let (true, Some(slot)) = (self.envelope_is_driving(ch), self.env_slot[ch]) {
+            let steps = self.envelope_steps(slot);
+            let step = self.env_step[ch].min(steps.len() - 1);
+            self.scaled_volume(ch, steps[step])
         } else {
             self.remembered_vol[ch]
         }
     }
 
+    fn arm_envelope(&mut self, ch: usize) {
+        let Some(slot) = self.env_slot[ch] else {
+            self.env_running[ch] = false;
+            return;
+        };
+        let count = self.envelope_steps(slot).len();
+        let per_step = (self.samples_per_beat / count as f64).max(1.0);
+        self.samples_per_env_step[ch] = per_step;
+        self.samples_until_env_step[ch] = per_step;
+        self.env_step[ch] = 0;
+        self.env_running[ch] = count > 1;
+    }
+
+    fn advance_envelopes(&mut self) {
+        for ch in 0..AUDIO_CHANNELS {
+            if !self.env_running[ch] || !self.envelope_is_driving(ch) {
+                continue;
+            }
+            self.samples_until_env_step[ch] -= 1.0;
+            while self.samples_until_env_step[ch] <= 0.0 && self.env_running[ch] {
+                self.samples_until_env_step[ch] += self.samples_per_env_step[ch];
+                let slot = self.env_slot[ch].unwrap();
+                let last = self.envelope_steps(slot).len() - 1;
+                if self.env_step[ch] < last {
+                    self.env_step[ch] += 1;
+                }
+                if self.env_step[ch] == last {
+                    self.env_running[ch] = false;
+                }
+                let vol = self.current_channel_volume(ch);
+                self.set_voice_volume(ch, vol);
+            }
+        }
+    }
+
     fn rebuild_channel_state(&mut self, pattern_idx: usize, row: usize) {
+        let from_song_start = pattern_idx == 0 && row == 0;
         for ch in 0..AUDIO_CHANNELS {
             let mut vol = 0u8;
             let mut muted = true;
             let mut note_name: Option<String> = None;
             let mut base_freq: u16 = 0;
-            let mut instrument = ch;
+            let mut instrument = if from_song_start { ch } else { self.current_instrument[ch] };
+            let mut env_slot: Option<usize> = if from_song_start { None } else { self.env_slot[ch] };
+            let mut env_suppressed = false;
             for r in 0..row {
                 let beat = &self.patterns[pattern_idx][ch + 1][r];
                 for cmd in &beat.cmd_list {
@@ -369,12 +436,15 @@ impl PlayerInner {
                         ChannelCmd::Volume(v) => {
                             vol = *v;
                             muted = false;
+                            env_suppressed = false;
                         }
                         ChannelCmd::NoteOff => {
                             muted = true;
+                            env_suppressed = true;
                         }
                         ChannelCmd::Note(name) => {
                             muted = false;
+                            env_suppressed = false;
                             note_name = Some(name.clone());
                             if let Some(&freq_hz) = self.tuning_notes.get(name.as_str()) {
                                 let freq_u32 =
@@ -384,6 +454,9 @@ impl PlayerInner {
                         }
                         ChannelCmd::Instrument(idx) => {
                             instrument = *idx as usize;
+                        }
+                        ChannelCmd::Envelope(slot) => {
+                            env_slot = envelope_slot(*slot);
                         }
                         _ => {}
                     }
@@ -397,13 +470,16 @@ impl PlayerInner {
             self.set_voice_waveptr(ch, instrument);
             self.arp_active[ch] = false;
             self.pitch_active[ch] = false;
-            self.fade_active[ch] = false;
+            self.env_slot[ch] = env_slot;
+            self.env_suppressed[ch] = env_suppressed;
+            self.env_step[ch] = 0;
+            self.env_running[ch] = false;
         }
 
         for r in 0..row {
             if let Some(sqc) = &self.patterns[pattern_idx][0][r].sqc {
                 match sqc {
-                    SequencerCmd::Tempo(bpm) => self.bpm = *bpm as u16,
+                    SequencerCmd::Tempo(bpm) => self.bpm = *bpm,
                     SequencerCmd::FxSpeed(fx_speed) => self.fx_speed = *fx_speed,
                     SequencerCmd::Stop
                     | SequencerCmd::FlowCount(_)
@@ -412,7 +488,7 @@ impl PlayerInner {
                 }
             }
         }
-        self.samples_per_beat = self.output_sample_rate * 30.0 / (self.bpm.max(1) as f64);
+        self.samples_per_beat = self.output_sample_rate * 60.0 / (self.bpm.max(1) as f64);
         self.recompute_tick_timing();
     }
 
@@ -433,9 +509,9 @@ impl PlayerInner {
                         return;
                     }
                     SequencerCmd::Tempo(bpm) => {
-                        self.bpm = bpm as u16;
+                        self.bpm = bpm;
                         self.samples_per_beat =
-                            self.output_sample_rate * 30.0 / (self.bpm.max(1) as f64);
+                            self.output_sample_rate * 60.0 / (self.bpm.max(1) as f64);
                         self.recompute_tick_timing();
                     }
                     SequencerCmd::FxSpeed(fx_speed) => {
@@ -509,16 +585,8 @@ impl PlayerInner {
                 ChannelCmd::PitchDown(x) => Some(*x),
                 _ => None,
             });
-            let maybe_fade_in = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::FadeIn(x) => Some(*x),
-                _ => None,
-            });
-            let maybe_fade_out = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::FadeOut(x) => Some(*x),
-                _ => None,
-            });
-            let maybe_tremble = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::Tremble(x) => Some(*x),
+            let maybe_envelope = beat.cmd_list.iter().find_map(|c| match c {
+                ChannelCmd::Envelope(x) => Some(*x),
                 _ => None,
             });
 
@@ -527,12 +595,18 @@ impl PlayerInner {
                 self.set_voice_waveptr(ch, idx);
             }
 
+            if let Some(slot) = maybe_envelope {
+                self.env_slot[ch] = envelope_slot(slot);
+            }
+
             if let Some(v) = maybe_vol {
                 self.remembered_vol[ch] = v;
                 self.muted[ch] = false;
+                self.env_suppressed[ch] = false;
                 self.set_voice_volume(ch, v);
             } else if note_off {
                 self.muted[ch] = true;
+                self.env_suppressed[ch] = true;
                 self.set_voice_volume(ch, 0);
             }
 
@@ -542,6 +616,7 @@ impl PlayerInner {
                     let freq_u32 = ((freq_hz / self.acp_sample_rate) * 65536.0).round() as u32;
                     let freq = freq_u32.min(0xFFFF) as u16;
                     self.base_freq[ch] = freq;
+                    self.env_suppressed[ch] = false;
                     if maybe_vol.is_none() && self.muted[ch] {
                         self.muted[ch] = false;
                         self.set_voice_volume(ch, self.remembered_vol[ch]);
@@ -549,49 +624,14 @@ impl PlayerInner {
                 }
             }
 
-            let cur_effective_vol = if self.muted[ch] { 0 } else { self.remembered_vol[ch] };
-            if let Some(x) = maybe_fade_in {
-                if cur_effective_vol == 0 {
-                    self.fade_active[ch] = false;
-                    self.tremble_active[ch] = false;
-                    self.set_voice_volume(ch, 0);
-                } else {
-                    self.fade_active[ch] = true;
-                    self.tremble_active[ch] = false;
-                    self.fade_target[ch] = cur_effective_vol;
-                    self.fade_cur[ch] = 0;
-                    let fade_hold = (x >> 4).max(1);
-                    self.vol_fx_hold[ch] = fade_hold;
-                    self.vol_fx_counter[ch] = fade_hold;
-                    self.set_voice_volume(ch, self.fade_cur[ch]);
-                }
-            } else if let Some(x) = maybe_fade_out {
-                if cur_effective_vol == 0 {
-                    self.fade_active[ch] = false;
-                    self.tremble_active[ch] = false;
-                    self.set_voice_volume(ch, 0);
-                } else {
-                    self.fade_active[ch] = true;
-                    self.tremble_active[ch] = false;
-                    self.fade_target[ch] = 0;
-                    self.fade_cur[ch] = cur_effective_vol;
-                    let fade_hold = (x >> 4).max(1);
-                    self.vol_fx_hold[ch] = fade_hold;
-                    self.vol_fx_counter[ch] = fade_hold;
-                    self.set_voice_volume(ch, self.fade_cur[ch]);
-                }
-            } else if let Some(x) = maybe_tremble {
-                self.fade_active[ch] = false;
-                self.tremble_active[ch] = true;
-                self.vol_fx_hold[ch] = x;
-                self.vol_fx_counter[ch] = x;
-                self.tremble_muted[ch] = false;
-                self.set_voice_volume(ch, cur_effective_vol);
+            if self.envelope_is_driving(ch) {
+                self.arm_envelope(ch);
             } else {
-                self.fade_active[ch] = false;
-                self.tremble_active[ch] = false;
-                self.set_voice_volume(ch, cur_effective_vol);
+                self.env_running[ch] = false;
+                self.env_step[ch] = 0;
             }
+            let vol = self.current_channel_volume(ch);
+            self.set_voice_volume(ch, vol);
 
             if let Some((x, y)) = maybe_arp {
                 let note_name = maybe_note.clone().or_else(|| self.cur_note_name[ch].clone());
@@ -708,39 +748,6 @@ impl PlayerInner {
                 self.pitch_cur[ch] = next;
                 self.set_voice_frequency(ch, next);
             }
-
-            if self.fade_active[ch] {
-                if self.vol_fx_counter[ch] == 0 {
-                    let cur = self.fade_cur[ch];
-                    let target = self.fade_target[ch];
-                    let next = match cur.cmp(&target) {
-                        std::cmp::Ordering::Less => cur + 1,
-                        std::cmp::Ordering::Greater => cur - 1,
-                        std::cmp::Ordering::Equal => cur,
-                    };
-                    self.fade_cur[ch] = next;
-                    self.set_voice_volume(ch, next);
-                    if next == target {
-                        self.fade_active[ch] = false;
-                    }
-                    self.vol_fx_counter[ch] = self.vol_fx_hold[ch];
-                } else {
-                    self.vol_fx_counter[ch] -= 1;
-                }
-            } else if self.tremble_active[ch] {
-                if self.vol_fx_counter[ch] == 0 {
-                    self.tremble_muted[ch] = !self.tremble_muted[ch];
-                    let vol = if self.tremble_muted[ch] || self.muted[ch] {
-                        0
-                    } else {
-                        self.remembered_vol[ch]
-                    };
-                    self.set_voice_volume(ch, vol);
-                    self.vol_fx_counter[ch] = self.vol_fx_hold[ch];
-                } else {
-                    self.vol_fx_counter[ch] -= 1;
-                }
-            }
         }
     }
 
@@ -785,6 +792,8 @@ impl PlayerInner {
         let frame_count = data.len() / out_ch;
 
         for frame in 0..frame_count {
+            self.advance_envelopes();
+
             self.samples_until_next_tick -= 1.0;
             if self.samples_until_next_tick <= 0.0 {
                 self.samples_until_next_tick += self.samples_per_tick.max(1.0);
@@ -933,6 +942,10 @@ impl Player {
         let _ = self
             .cmd_tx
             .send(PlayerCmd::UpdateWaveform(idx, Box::new(waveform)));
+    }
+
+    pub fn update_envelopes(&self, envelopes: Vec<Vec<u8>>) {
+        let _ = self.cmd_tx.send(PlayerCmd::UpdateEnvelopes(envelopes));
     }
 
     pub fn update_tuning_notes(&self, notes: IndexMap<String, f64>) {

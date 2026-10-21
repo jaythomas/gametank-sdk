@@ -135,6 +135,7 @@
               libxcursor
               SDL2 # needed to run C-based emulator
               vulkan-loader
+              zip
             ]
             ++ [ llvm-mos ]; # provides mos-clang/lld used by build scripts and rustc
 

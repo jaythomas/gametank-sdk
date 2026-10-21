@@ -3,14 +3,24 @@ use std::{io, path::Path};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::tracker::{Beat, Pattern, empty_pattern};
+use crate::tracker::{
+    Beat, ChannelCmd, ENVELOPE_MAX_STEPS, MAX_VOLUME, NUM_ENVELOPES, Pattern, WAVEFORM_SAMPLES,
+    empty_pattern,
+};
 
 pub const NUM_INSTRUMENTS: usize = 8;
+pub const SCHEMA_VERSION: u8 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InstrumentData {
     pub name: String,
     pub waveform: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvelopeData {
+    pub name: String,
+    pub steps: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -32,6 +42,8 @@ pub struct TuningData {
 pub struct TrackerFile {
     pub schema_version: u8,
     pub instruments: [InstrumentData; NUM_INSTRUMENTS],
+    #[serde(default = "default_envelopes")]
+    pub envelopes: Vec<EnvelopeData>,
     #[serde(default = "default_tuning")]
     pub tuning: TuningData,
     #[serde(
@@ -213,9 +225,102 @@ fn default_pattern_beats() -> Vec<u8> {
     vec![64]
 }
 
-/// The instrument that new tracks fill with noise: the one the last voice (6)
-/// plays by default, giving a ready-made percussion channel.
-const NOISE_INSTRUMENT_INDEX: usize = 6;
+/// `steps` values running from `from` to `to` inclusive.
+fn ramp(from: u8, to: u8, steps: usize) -> Vec<u8> {
+    if steps <= 1 {
+        return vec![from];
+    }
+    let span = to as f64 - from as f64;
+    (0..steps)
+        .map(|i| (from as f64 + span * i as f64 / (steps - 1) as f64).round() as u8)
+        .collect()
+}
+
+fn hold(level: u8, steps: usize) -> Vec<u8> {
+    vec![level; steps]
+}
+
+pub fn default_envelopes() -> Vec<EnvelopeData> {
+    const FULL: u8 = MAX_VOLUME;
+    const N: usize = ENVELOPE_MAX_STEPS;
+
+    let shapes: [(&str, Vec<u8>); NUM_ENVELOPES] = [
+        ("0 Pop", [vec![FULL], hold(0, N - 1)].concat()),
+        ("1 Pizz", [ramp(FULL, 0, 6), hold(0, N - 6)].concat()),
+        ("2 Fade out", ramp(FULL, 0, N)),
+        ("3 Fade in", [ramp(0, FULL, 16), hold(FULL, 16)].concat()),
+        ("4 Crash in", [ramp(0, FULL, 4), hold(FULL, N - 4)].concat()),
+        ("5 Swell", [ramp(0, FULL, 16), ramp(FULL, 0, 16)].concat()),
+        (
+            "6 Vibrate",
+            (0..4)
+                .flat_map(|_| [ramp(0, FULL, 2), ramp(FULL, 0, 6)].concat())
+                .collect(),
+        ),
+        (
+            "7 Tremble",
+            (0..N / 4).flat_map(|_| [FULL, FULL, 0, 0]).collect(),
+        ),
+    ];
+
+    shapes
+        .into_iter()
+        .map(|(name, steps)| EnvelopeData {
+            name: name.to_string(),
+            steps,
+        })
+        .collect()
+}
+
+fn square_waveform(high_samples: usize) -> Vec<u8> {
+    (0..WAVEFORM_SAMPLES)
+        .map(|i| if i < high_samples { 0xFF } else { 0x00 })
+        .collect()
+}
+
+fn sine_waveform() -> Vec<u8> {
+    let peak = 255.0 / 2.0;
+    (0..WAVEFORM_SAMPLES)
+        .map(|i| {
+            let phase = i as f64 / WAVEFORM_SAMPLES as f64 * std::f64::consts::TAU;
+            (peak + peak * phase.sin()).round() as u8
+        })
+        .collect()
+}
+
+fn triangle_waveform() -> Vec<u8> {
+    let half = WAVEFORM_SAMPLES / 2;
+    (0..WAVEFORM_SAMPLES)
+        .map(|i| {
+            let rise = if i <= half { i } else { WAVEFORM_SAMPLES - i };
+            (rise * 0xFF / half) as u8
+        })
+        .collect()
+}
+
+fn smoothed_noise_waveform(anchor_stride: usize) -> Vec<u8> {
+    let sampled: Vec<u8> = NOISE_WAVEFORM
+        .iter()
+        .step_by(anchor_stride)
+        .copied()
+        .collect();
+    let low = *sampled.iter().min().unwrap() as usize;
+    let span = *sampled.iter().max().unwrap() as usize - low;
+    let anchors: Vec<usize> = sampled
+        .iter()
+        .map(|&v| (v as usize - low) * 0xFF / span)
+        .collect();
+
+    (0..WAVEFORM_SAMPLES)
+        .map(|i| {
+            let anchor = i / anchor_stride;
+            let from = anchors[anchor];
+            let to = anchors[(anchor + 1) % anchors.len()];
+            let blend = i % anchor_stride;
+            ((from * (anchor_stride - blend) + to * blend) / anchor_stride) as u8
+        })
+        .collect()
+}
 
 /// White noise: a shuffle of every byte value, so it is flat in level and has
 /// no DC offset.
@@ -240,21 +345,24 @@ const NOISE_WAVEFORM: [u8; 256] = [
 
 impl TrackerFile {
     pub fn empty() -> Self {
-        let mut square = vec![0xFFu8; 256];
-        for b in square[128..].iter_mut() {
-            *b = 0x00;
-        }
+        let defaults: [(&str, Vec<u8>); NUM_INSTRUMENTS] = [
+            ("0 Square", square_waveform(WAVEFORM_SAMPLES / 2)),
+            ("1 Sine", sine_waveform()),
+            ("2 Triangle", triangle_waveform()),
+            ("3 Square", square_waveform(WAVEFORM_SAMPLES * 3 / 8)),
+            ("4 Square", square_waveform(WAVEFORM_SAMPLES / 4)),
+            ("5 Square", square_waveform(WAVEFORM_SAMPLES / 8)),
+            ("6 Crash", NOISE_WAVEFORM.to_vec()),
+            ("7 Boom", smoothed_noise_waveform(16)),
+        ];
         Self {
-            schema_version: 0,
-            instruments: std::array::from_fn(|i| InstrumentData {
-                name: format!("instrument_{}", i),
-                waveform: if i == NOISE_INSTRUMENT_INDEX {
-                    NOISE_WAVEFORM.to_vec()
-                } else {
-                    square.clone()
-                },
+            schema_version: SCHEMA_VERSION,
+            instruments: defaults.map(|(name, waveform)| InstrumentData {
+                name: name.to_string(),
+                waveform,
             }),
             tuning: default_tuning(),
+            envelopes: default_envelopes(),
             patterns: vec![empty_pattern()],
             pattern_beats: vec![64],
             bpm: 120,
@@ -308,13 +416,63 @@ impl TrackerFile {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != 0 {
+        if self.schema_version > SCHEMA_VERSION {
             return Err(format!(
-                "unsupported schema version {} (expected 0)",
-                self.schema_version
+                "unsupported schema version {} (expected {} or lower)",
+                self.schema_version, SCHEMA_VERSION
             ));
         }
         Ok(())
+    }
+
+    pub fn envelope_names(&self) -> [String; NUM_ENVELOPES] {
+        std::array::from_fn(|i| {
+            self.envelopes
+                .get(i)
+                .map(|e| e.name.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    pub fn envelope_steps(&self, idx: usize) -> Vec<u8> {
+        let mut steps: Vec<u8> = self
+            .envelopes
+            .get(idx)
+            .map(|e| e.steps.clone())
+            .unwrap_or_default();
+        steps.truncate(ENVELOPE_MAX_STEPS);
+        for step in steps.iter_mut() {
+            *step = (*step).min(MAX_VOLUME);
+        }
+        if steps.is_empty() {
+            steps.push(MAX_VOLUME);
+        }
+        steps
+    }
+
+    /// Bring a file written by an older schema version up to the current one.
+    fn migrate(&mut self) {
+        if self.schema_version < 1 {
+            self.migrate_to_v1();
+        }
+        self.schema_version = SCHEMA_VERSION;
+    }
+
+    // Envelopes replaced the FadeIn, FadeOut and Tremble effects.
+    fn migrate_to_v1(&mut self) {
+        for pattern in self.patterns.iter_mut() {
+            for channel in pattern.iter_mut() {
+                for beat in channel.iter_mut() {
+                    beat.cmd_list.retain(|cmd| {
+                        !matches!(
+                            cmd,
+                            ChannelCmd::FadeIn(_) | ChannelCmd::FadeOut(_) | ChannelCmd::Tremble(_)
+                        )
+                    });
+                }
+            }
+        }
+        self.envelopes = default_envelopes();
     }
 
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
@@ -322,6 +480,7 @@ impl TrackerFile {
         let mut file: TrackerFile = rmp_serde::from_slice(&bytes)?;
         file.validate()
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        file.migrate();
         while file.pattern_beats.len() < file.patterns.len() {
             file.pattern_beats.push(64);
         }

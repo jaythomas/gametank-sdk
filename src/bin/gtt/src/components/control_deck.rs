@@ -19,18 +19,81 @@ use crate::{
     component::Component,
     file::{NUM_INSTRUMENTS, TrackerFile},
     scheme::SCHEME,
-    tracker::{PATTERN_BEATS, PATTERN_TABLE_WIDTH},
+    tracker::{MAX_TEMPO, NUM_ENVELOPES, PATTERN_BEATS, PATTERN_TABLE_WIDTH},
 };
 
 const BTN_W: u16 = 3;
 
-struct InstrumentEntry {
+struct SlotStyles {
+    default_style: Style,
+    selected_style: Style,
+    btn_base: Style,
+    btn_focus: Style,
+}
+
+fn render_named_slots(
+    frame: &mut Frame,
+    entries: &mut [NamedSlotEntry],
+    rows: &[Rect],
+    selected: Option<(usize, Col)>,
+    editing: bool,
+    styles: &SlotStyles,
+) {
+    for (idx, entry) in entries.iter_mut().enumerate() {
+        let Some(&cell_area) = rows.get(idx) else {
+            break;
+        };
+        let open_focused = selected == Some((idx, Col::Open));
+        let input_focused = selected == Some((idx, Col::Input));
+
+        let [btn_area, _, input_area] = Layout::horizontal([
+            Constraint::Length(BTN_W),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(cell_area);
+
+        let open_line = Line::from("[⚙]").style(if open_focused {
+            styles.btn_focus
+        } else {
+            styles.btn_base
+        });
+        entry.open_button.focus.set(open_focused);
+        frame.render_stateful_widget(
+            Button::new(open_line)
+                .style(styles.btn_base)
+                .focus_style(styles.btn_focus),
+            btn_area,
+            &mut entry.open_button,
+        );
+
+        entry.name_input.focus.set(input_focused && editing);
+        frame.render_stateful_widget(
+            TextInput::new().style(if input_focused {
+                styles.selected_style
+            } else {
+                styles.default_style
+            }),
+            input_area,
+            &mut entry.name_input,
+        );
+
+        if input_focused
+            && editing
+            && let Some((cx, cy)) = entry.name_input.screen_cursor()
+        {
+            frame.set_cursor_position((cx, cy));
+        }
+    }
+}
+
+struct NamedSlotEntry {
     open_button: ButtonState,
     name_input: TextInputState,
     name_snapshot: String,
 }
 
-impl InstrumentEntry {
+impl NamedSlotEntry {
     fn new(name: &str) -> Self {
         let mut name_input = TextInputState::new();
         name_input.set_value(name);
@@ -51,6 +114,7 @@ enum Row {
     ActionPlay,
     ActionNewOpen,
     Instrument(usize),
+    Envelope(usize),
     ActionTuning,
     ActionQuit,
     ActionSave,
@@ -93,6 +157,7 @@ impl Row {
             Row::Beats => "Beats:   ",
             Row::Trans => "Trans:   ",
             Row::Instrument(_)
+            | Row::Envelope(_)
             | Row::ActionPlay
             | Row::ActionNewOpen
             | Row::ActionTuning
@@ -110,11 +175,12 @@ impl Row {
 
     fn range(self) -> (u16, u16) {
         match self {
-            Row::Bpm => (1, 399),
+            Row::Bpm => (1, MAX_TEMPO),
             Row::FxSpeed => (1, 31),
             Row::Beats => (0, 255),
             Row::Trans
             | Row::Instrument(_)
+            | Row::Envelope(_)
             | Row::ActionPlay
             | Row::ActionNewOpen
             | Row::ActionTuning
@@ -179,6 +245,7 @@ fn default_col(row: Row) -> Col {
     match row {
         Row::Bpm | Row::FxSpeed | Row::Beats | Row::Trans => Col::Input,
         Row::Instrument(_)
+        | Row::Envelope(_)
         | Row::ActionPlay
         | Row::ActionNewOpen
         | Row::ActionTuning
@@ -210,7 +277,8 @@ pub struct ControlDeck {
     fx_speed_plus: ButtonState,
     fx_speed_snapshot: String,
     pub editing: bool,
-    instruments: [InstrumentEntry; NUM_INSTRUMENTS],
+    instruments: [NamedSlotEntry; NUM_INSTRUMENTS],
+    envelopes: [NamedSlotEntry; NUM_ENVELOPES],
     pub playing: bool,
     rows_input: TextInputState,
     rows_minus: ButtonState,
@@ -271,8 +339,9 @@ impl ControlDeck {
             trans_note_count: 0,
             trans_scale_size: 0,
             instruments: std::array::from_fn(|i| {
-                InstrumentEntry::new(&format!("instrument_{}", i))
+                NamedSlotEntry::new(&format!("instrument_{}", i))
             }),
+            envelopes: std::array::from_fn(|i| NamedSlotEntry::new(&format!("envelope_{}", i))),
             playing: false,
             action_tuning_btn: ButtonState::new(),
             action_new_open_btn: ButtonState::new(),
@@ -304,6 +373,17 @@ impl ControlDeck {
         }
     }
 
+    pub fn get_envelope_names(&self) -> [String; NUM_ENVELOPES] {
+        std::array::from_fn(|i| self.envelopes[i].name_input.value::<String>())
+    }
+
+    pub fn set_envelope_names(&mut self, names: &[String; NUM_ENVELOPES]) {
+        for (i, envelope) in self.envelopes.iter_mut().enumerate() {
+            envelope.name_input.set_value(names[i].clone());
+            envelope.name_snapshot = names[i].clone();
+        }
+    }
+
     pub fn blur_all(&mut self) {
         if self.editing {
             self.confirm_editing();
@@ -320,7 +400,7 @@ impl ControlDeck {
         self.trans_input.focus.set(false);
         self.trans_plus.focus.set(false);
         self.trans_minus.focus.set(false);
-        for entry in &mut self.instruments {
+        for entry in self.instruments.iter_mut().chain(self.envelopes.iter_mut()) {
             entry.open_button.focus.set(false);
             entry.name_input.focus.set(false);
         }
@@ -482,6 +562,17 @@ impl ControlDeck {
                 .focus
                 .set(is_row && col == Col::Input && editing);
         }
+        for i in 0..NUM_ENVELOPES {
+            let is_row = row == Row::Envelope(i);
+            self.envelopes[i]
+                .open_button
+                .focus
+                .set(is_row && col == Col::Open);
+            self.envelopes[i]
+                .name_input
+                .focus
+                .set(is_row && col == Col::Input && editing);
+        }
         self.action_tuning_btn.focus.set(row == Row::ActionTuning);
         self.action_new_open_btn
             .focus
@@ -505,6 +596,7 @@ impl ControlDeck {
             Row::Beats => &mut self.rows_input,
             Row::Trans => &mut self.trans_input,
             Row::Instrument(i) => &mut self.instruments[i].name_input,
+            Row::Envelope(i) => &mut self.envelopes[i].name_input,
             Row::ActionPlay
             | Row::ActionNewOpen
             | Row::ActionTuning
@@ -531,6 +623,10 @@ impl ControlDeck {
             Row::Instrument(i) => {
                 let v = self.instruments[i].name_input.value::<String>();
                 self.instruments[i].name_snapshot = v;
+            }
+            Row::Envelope(i) => {
+                let v = self.envelopes[i].name_input.value::<String>();
+                self.envelopes[i].name_snapshot = v;
             }
             Row::ActionPlay
             | Row::ActionNewOpen
@@ -568,6 +664,10 @@ impl ControlDeck {
             Row::Instrument(i) => {
                 let s = self.instruments[i].name_snapshot.clone();
                 self.instruments[i].name_input.set_value(s);
+            }
+            Row::Envelope(i) => {
+                let s = self.envelopes[i].name_snapshot.clone();
+                self.envelopes[i].name_input.set_value(s);
             }
             Row::ActionPlay
             | Row::ActionNewOpen
@@ -640,6 +740,10 @@ impl ControlDeck {
             Row::Instrument(i) => {
                 let val = self.instruments[i].name_input.value::<String>();
                 self.instruments[i].name_snapshot = val;
+            }
+            Row::Envelope(i) => {
+                let val = self.envelopes[i].name_input.value::<String>();
+                self.envelopes[i].name_snapshot = val;
             }
             Row::ActionPlay
             | Row::ActionNewOpen
@@ -910,6 +1014,37 @@ impl ControlDeck {
             }
         }
 
+        for i in 0..NUM_ENVELOPES {
+            let open_area = self.envelopes[i].open_button.area;
+            let name_area = self.envelopes[i].name_input.area;
+            if open_area.contains(pos) {
+                if self.editing {
+                    self.confirm_editing();
+                }
+                self.selected_row = Row::Envelope(i);
+                self.selected_col = Col::Open;
+                actions.push(ComponentAction::OpenEnvelopeEditor(i));
+                self.update_focus_states();
+                return true;
+            }
+            if name_area.contains(pos) {
+                if self.editing
+                    && self.selected_row == Row::Envelope(i)
+                    && self.selected_col == Col::Input
+                {
+                    return true;
+                }
+                if self.editing {
+                    self.confirm_editing();
+                }
+                self.selected_row = Row::Envelope(i);
+                self.selected_col = Col::Input;
+                self.start_editing();
+                self.update_focus_states();
+                return true;
+            }
+        }
+
         let tuning_area = self.action_tuning_btn.area;
         let new_open_area = self.action_new_open_btn.area;
         let quit_area = self.action_quit_btn.area;
@@ -1102,7 +1237,9 @@ impl Component for ControlDeck {
                                     Row::ActionPlay => Row::Trans,
                                     Row::Instrument(0) => Row::ActionPlay,
                                     Row::Instrument(i) => Row::Instrument(i - 1),
-                                    Row::ActionTuning => Row::Instrument(NUM_INSTRUMENTS - 1),
+                                    Row::Envelope(0) => Row::Instrument(NUM_INSTRUMENTS - 1),
+                                    Row::Envelope(i) => Row::Envelope(i - 1),
+                                    Row::ActionTuning => Row::Envelope(NUM_ENVELOPES - 1),
                                     Row::ActionNewOpen => Row::ActionTuning,
                                     Row::ActionQuit => Row::ActionTuning,
                                     Row::ActionSave => Row::ActionNewOpen,
@@ -1128,7 +1265,11 @@ impl Component for ControlDeck {
                                     Row::Instrument(i) if i < NUM_INSTRUMENTS - 1 => {
                                         Row::Instrument(i + 1)
                                     }
-                                    Row::Instrument(_) => Row::ActionTuning,
+                                    Row::Instrument(_) => Row::Envelope(0),
+                                    Row::Envelope(i) if i < NUM_ENVELOPES - 1 => {
+                                        Row::Envelope(i + 1)
+                                    }
+                                    Row::Envelope(_) => Row::ActionTuning,
                                     Row::ActionTuning => Row::ActionNewOpen,
                                     Row::ActionNewOpen => Row::ActionSave,
                                     Row::ActionQuit => Row::ActionExport,
@@ -1186,6 +1327,9 @@ impl Component for ControlDeck {
                                         Row::Instrument(i) => {
                                             actions
                                                 .push(ComponentAction::OpenInstrumentEditor(i));
+                                        }
+                                        Row::Envelope(i) => {
+                                            actions.push(ComponentAction::OpenEnvelopeEditor(i));
                                         }
                                         Row::ActionTuning => {
                                             actions.push(ComponentAction::OpenTuningEditor);
@@ -1260,7 +1404,7 @@ impl Component for ControlDeck {
             height: area.height,
         };
 
-        let [settings_col, inst_left_col, inst_right_col, actions_col] = Layout::horizontal([
+        let [settings_col, instrument_col, envelope_col, actions_col] = Layout::horizontal([
             Constraint::Fill(1),
             Constraint::Fill(1),
             Constraint::Fill(1),
@@ -1280,6 +1424,7 @@ impl Component for ControlDeck {
             .add_modifier(Modifier::BOLD);
 
         let setting_rows = Layout::vertical([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -1376,9 +1521,9 @@ impl Component for ControlDeck {
         let play_focused = sel_row == Row::ActionPlay;
         let play_label = if self.playing { "[Pause]" } else { "[Play]" };
         let play_area = Rect {
-            x: setting_rows[5].x,
-            y: setting_rows[5].y,
-            width: PLAY_BTN_W.min(setting_rows[5].width),
+            x: setting_rows[6].x,
+            y: setting_rows[6].y,
+            width: PLAY_BTN_W.min(setting_rows[6].width),
             height: 1,
         };
         self.action_play_btn.focus.set(play_focused);
@@ -1394,123 +1539,41 @@ impl Component for ControlDeck {
             &mut self.action_play_btn,
         );
 
-        let left_inst_rows = Layout::vertical([Constraint::Length(1); 6]).split(inst_left_col);
-        let right_inst_rows = Layout::vertical([Constraint::Length(1); 6]).split(inst_right_col);
+        let instrument_rows =
+            Layout::vertical([Constraint::Length(1); NUM_INSTRUMENTS]).split(instrument_col);
+        let envelope_rows =
+            Layout::vertical([Constraint::Length(1); NUM_ENVELOPES]).split(envelope_col);
 
-        const INST_LEFT_COUNT: usize = NUM_INSTRUMENTS / 2;
-
-        for idx in 0..INST_LEFT_COUNT {
-            let cell_area = left_inst_rows[idx];
-            let is_row = sel_row == Row::Instrument(idx);
-            let open_focused = is_row && sel_col == Col::Open;
-            let input_focused = is_row && sel_col == Col::Input;
-
-            let [btn_area, _, input_area] = Layout::horizontal([
-                Constraint::Length(BTN_W),
-                Constraint::Length(1),
-                Constraint::Fill(1),
-            ])
-            .areas(cell_area);
-
-            let open_line =
-                Line::from("[⚙]").style(if open_focused { btn_focus } else { btn_base });
-            self.instruments[idx].open_button.focus.set(open_focused);
-            frame.render_stateful_widget(
-                Button::new(open_line)
-                    .style(btn_base)
-                    .focus_style(btn_focus),
-                btn_area,
-                &mut self.instruments[idx].open_button,
-            );
-
-            self.instruments[idx]
-                .name_input
-                .focus
-                .set(input_focused && editing);
-            frame.render_stateful_widget(
-                TextInput::new().style(if input_focused {
-                    selected_style
-                } else {
-                    default_style
-                }),
-                input_area,
-                &mut self.instruments[idx].name_input,
-            );
-
-            if input_focused
-                && editing
-                && let Some((cx, cy)) = self.instruments[idx].name_input.screen_cursor()
-            {
-                frame.set_cursor_position((cx, cy));
-            }
-        }
-
-        for vis in 0..NUM_INSTRUMENTS - INST_LEFT_COUNT {
-            let idx = vis + INST_LEFT_COUNT;
-            let cell_area = right_inst_rows[vis];
-            let is_row = sel_row == Row::Instrument(idx);
-            let open_focused = is_row && sel_col == Col::Open;
-            let input_focused = is_row && sel_col == Col::Input;
-
-            let [btn_area, _, input_area] = Layout::horizontal([
-                Constraint::Length(BTN_W),
-                Constraint::Length(1),
-                Constraint::Fill(1),
-            ])
-            .areas(cell_area);
-
-            let open_line =
-                Line::from("[⚙]").style(if open_focused { btn_focus } else { btn_base });
-            self.instruments[idx].open_button.focus.set(open_focused);
-            frame.render_stateful_widget(
-                Button::new(open_line)
-                    .style(btn_base)
-                    .focus_style(btn_focus),
-                btn_area,
-                &mut self.instruments[idx].open_button,
-            );
-
-            self.instruments[idx]
-                .name_input
-                .focus
-                .set(input_focused && editing);
-            frame.render_stateful_widget(
-                TextInput::new().style(if input_focused {
-                    selected_style
-                } else {
-                    default_style
-                }),
-                input_area,
-                &mut self.instruments[idx].name_input,
-            );
-
-            if input_focused
-                && editing
-                && let Some((cx, cy)) = self.instruments[idx].name_input.screen_cursor()
-            {
-                frame.set_cursor_position((cx, cy));
-            }
-        }
-
-        let tuning_focused = sel_row == Row::ActionTuning;
-        const TUNING_BTN_W: u16 = 15;
-        let tuning_btn_area = Rect {
-            x: right_inst_rows[5].x,
-            y: right_inst_rows[5].y,
-            width: TUNING_BTN_W.min(right_inst_rows[5].width),
-            height: 1,
+        let slot_styles = SlotStyles {
+            default_style,
+            selected_style,
+            btn_base,
+            btn_focus,
         };
-        self.action_tuning_btn.focus.set(tuning_focused);
-        frame.render_stateful_widget(
-            Button::new(Line::from("[Tuning editor]").style(if tuning_focused {
-                btn_focus
-            } else {
-                btn_base
-            }))
-            .style(btn_base)
-            .focus_style(btn_focus),
-            tuning_btn_area,
-            &mut self.action_tuning_btn,
+        let selected_instrument = match sel_row {
+            Row::Instrument(i) => Some((i, sel_col)),
+            _ => None,
+        };
+        let selected_envelope = match sel_row {
+            Row::Envelope(i) => Some((i, sel_col)),
+            _ => None,
+        };
+
+        render_named_slots(
+            frame,
+            &mut self.instruments,
+            &instrument_rows,
+            selected_instrument,
+            editing,
+            &slot_styles,
+        );
+        render_named_slots(
+            frame,
+            &mut self.envelopes,
+            &envelope_rows,
+            selected_envelope,
+            editing,
+            &slot_styles,
         );
 
         let action_rows = Layout::vertical([
@@ -1527,6 +1590,27 @@ impl Component for ControlDeck {
 
         const NEW_OPEN_BTN_W: u16 = 10;
         const QUIT_BTN_W: u16 = 6;
+        const TUNING_BTN_W: u16 = 15;
+
+        let tuning_focused = sel_row == Row::ActionTuning;
+        let tuning_btn_area = Rect {
+            x: action_rows[2].x,
+            y: action_rows[2].y,
+            width: TUNING_BTN_W.min(action_rows[2].width),
+            height: 1,
+        };
+        self.action_tuning_btn.focus.set(tuning_focused);
+        frame.render_stateful_widget(
+            Button::new(Line::from("[Tuning editor]").style(if tuning_focused {
+                btn_focus
+            } else {
+                btn_base
+            }))
+            .style(btn_base)
+            .focus_style(btn_focus),
+            tuning_btn_area,
+            &mut self.action_tuning_btn,
+        );
 
         let new_open_focused = sel_row == Row::ActionNewOpen;
         let quit_focused = sel_row == Row::ActionQuit;
@@ -1626,7 +1710,7 @@ impl Component for ControlDeck {
             &mut self.action_export_btn,
         );
 
-        let pattern_nav_row = action_rows[3];
+        let pattern_nav_row = action_rows[4];
         let pattern_prev_focused = sel_row == Row::PatternPrev;
         let pattern_next_focused = sel_row == Row::PatternNext;
         const PATTERN_NAV_BTN_W: u16 = 5;
@@ -1666,7 +1750,7 @@ impl Component for ControlDeck {
             pattern_label_area,
         );
 
-        let pattern_mgmt_row = action_rows[5];
+        let pattern_mgmt_row = action_rows[6];
         let pattern_new_focused = sel_row == Row::PatternNew;
         let pattern_copy_focused = sel_row == Row::PatternCopy;
         let pattern_delete_focused = sel_row == Row::PatternDelete;

@@ -13,13 +13,14 @@ use crate::{
     action::ComponentAction,
     component::Component,
     components::{
-        CommandPalette, ExportConfirmModal, FileBrowser, InstrumentEditor,
+        CommandPalette, EnvelopeEditor, ExportConfirmModal, FileBrowser, InstrumentEditor,
         PatternDeleteConfirmModal, QuitConfirmModal, TrackerContainer, TuningEditor,
     },
     config::{GttConfig, build_key_assignments, config_to_tuning_keys},
     export,
     file::{NUM_INSTRUMENTS, TrackerFile},
     player::Player,
+    tracker::NUM_ENVELOPES,
 };
 
 pub struct App {
@@ -30,6 +31,7 @@ pub struct App {
     config: GttConfig,
     command_palette: CommandPalette,
     instrument_editor: InstrumentEditor,
+    envelope_editor: EnvelopeEditor,
     tuning_editor: TuningEditor,
     file_browser: FileBrowser,
     quit_confirm: QuitConfirmModal,
@@ -66,6 +68,7 @@ impl App {
             config,
             command_palette: CommandPalette::init(),
             instrument_editor: InstrumentEditor::init(),
+            envelope_editor: EnvelopeEditor::init(),
             tuning_editor: TuningEditor::init(),
             file_browser,
             quit_confirm: QuitConfirmModal::init(),
@@ -79,6 +82,10 @@ impl App {
         let names = self.tracker_container.get_instrument_names();
         for (i, name) in names.iter().enumerate() {
             self.file_data.instruments[i].name = name.clone();
+        }
+        let envelope_names = self.tracker_container.get_envelope_names();
+        for (i, name) in envelope_names.iter().enumerate() {
+            self.file_data.envelopes[i].name = name.clone();
         }
         self.file_data.bpm = self.tracker_container.get_bpm();
         self.file_data.fx_speed = self.tracker_container.get_fx_speed();
@@ -141,6 +148,8 @@ impl App {
                 self.pattern_delete_confirm.update(events, &mut self.file_data)
             } else if self.instrument_editor.visible {
                 self.instrument_editor.update(events, &mut self.file_data)
+            } else if self.envelope_editor.visible {
+                self.envelope_editor.update(events, &mut self.file_data)
             } else if self.tuning_editor.visible {
                 self.tuning_editor.update(events, &mut self.file_data)
             } else if self.file_browser.visible {
@@ -175,6 +184,7 @@ impl App {
             let tc = &mut self.tracker_container;
             let cp = &mut self.command_palette;
             let ie = &mut self.instrument_editor;
+            let ee = &mut self.envelope_editor;
             let te = &mut self.tuning_editor;
             let fb = &mut self.file_browser;
             let qc = &mut self.quit_confirm;
@@ -197,6 +207,9 @@ impl App {
                 }
                 if ie.visible {
                     ie.render(f, area, file);
+                }
+                if ee.visible {
+                    ee.render(f, area, file);
                 }
                 if te.visible {
                     te.render(f, area, file);
@@ -258,6 +271,9 @@ impl App {
                 ComponentAction::InstrumentSaved(idx, waveform) => {
                     self.file_data.instruments[idx].waveform = waveform.to_vec();
                 }
+                ComponentAction::EnvelopeSaved(idx, steps) => {
+                    self.file_data.envelopes[idx].steps = steps;
+                }
                 ComponentAction::MuteChannel => {
                     if let Some(ch) = self.tracker_container.active_channel() {
                         self.tracker_container.set_channel_muted(ch, true);
@@ -291,6 +307,11 @@ impl App {
                     let name = self.tracker_container.get_instrument_names()[idx].clone();
                     let waveform = self.file_data.instrument_waveform(idx);
                     self.instrument_editor.open(idx, &name, &waveform);
+                }
+                ComponentAction::OpenEnvelopeEditor(idx) => {
+                    let name = self.tracker_container.get_envelope_names()[idx].clone();
+                    let steps = self.file_data.envelope_steps(idx);
+                    self.envelope_editor.open(idx, &name, &steps);
                 }
                 ComponentAction::OpenPatternDeleteConfirm => {
                     if self.file_data.patterns.len() <= 1 {
@@ -373,6 +394,11 @@ impl App {
                                 player.update_waveform(i, self.file_data.instrument_waveform(i));
                             }
                             player.update_tuning_notes(self.file_data.tuning.notes.clone());
+                            player.update_envelopes(
+                                (0..NUM_ENVELOPES)
+                                    .map(|i| self.file_data.envelope_steps(i))
+                                    .collect(),
+                            );
                             player.set_bpm(self.tracker_container.get_bpm());
                             player.set_fx_speed(self.tracker_container.get_fx_speed());
                             player.play(pattern_idx, row);

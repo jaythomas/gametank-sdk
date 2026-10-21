@@ -14,9 +14,9 @@ macro_rules! instrument_table {
     };
 }
 
-// The 8 fixed instrument slots don't fit in FIXED_FLASH
-// alongside everything else, so they're placed in bank 125.
-const INSTRUMENT_BANK: u8 = 125;
+// The 8 fixed instrument slots, the envelope step rows and the volume scale
+// don't fit in FIXED_FLASH alongside everything else, so they share bank 125.
+const AUDIO_ASSET_BANK: u8 = 125;
 
 #[unsafe(link_section = ".rodata.bank125")]
 static INSTRUMENT_TABLES: [[u8; 256]; WAVETABLE_COUNT] = [
@@ -30,13 +30,93 @@ static INSTRUMENT_TABLES: [[u8; 256]; WAVETABLE_COUNT] = [
     instrument_table!(7),
 ];
 
+macro_rules! envelope_bin {
+    ($n:literal) => {
+        *include_bytes!(concat!(
+            // gt-tracker's exported `envelopes/` folder
+            "../../../assets/envelopes/envelope_",
+            $n,
+            ".bin"
+        ))
+    };
+}
+
+const NUM_ENVELOPES: usize = 8;
+const ENVELOPE_MAX_STEPS: usize = 32;
+const ENVELOPE_BIN_SIZE: usize = 3 + ENVELOPE_MAX_STEPS;
+
+const ENVELOPE_BINS: [[u8; ENVELOPE_BIN_SIZE]; NUM_ENVELOPES] = [
+    envelope_bin!(0),
+    envelope_bin!(1),
+    envelope_bin!(2),
+    envelope_bin!(3),
+    envelope_bin!(4),
+    envelope_bin!(5),
+    envelope_bin!(6),
+    envelope_bin!(7),
+];
+
+// The bins are unpacked at compile time into three parallel tables so that
+// nothing on the hot path needs a multiply the 6502 cannot do. The step table
+// keeps a stride of ENVELOPE_MAX_STEPS, which makes a slot's row a shift.
+// Only the counts and thresholds are small enough to keep in FIXED_FLASH;
+// the step rows live in the asset bank alongside the volume scale.
+const fn envelope_step_counts() -> [u8; NUM_ENVELOPES] {
+    let mut counts = [0u8; NUM_ENVELOPES];
+    let mut slot = 0;
+    while slot < NUM_ENVELOPES {
+        counts[slot] = ENVELOPE_BINS[slot][0];
+        slot += 1;
+    }
+    counts
+}
+
+const fn envelope_thresholds() -> [u16; NUM_ENVELOPES] {
+    let mut thresholds = [0u16; NUM_ENVELOPES];
+    let mut slot = 0;
+    while slot < NUM_ENVELOPES {
+        thresholds[slot] =
+            ENVELOPE_BINS[slot][1] as u16 | ((ENVELOPE_BINS[slot][2] as u16) << 8);
+        slot += 1;
+    }
+    thresholds
+}
+
+const fn envelope_steps() -> [u8; NUM_ENVELOPES * ENVELOPE_MAX_STEPS] {
+    let mut steps = [0u8; NUM_ENVELOPES * ENVELOPE_MAX_STEPS];
+    let mut slot = 0;
+    while slot < NUM_ENVELOPES {
+        let mut step = 0;
+        while step < ENVELOPE_MAX_STEPS {
+            steps[slot * ENVELOPE_MAX_STEPS + step] = ENVELOPE_BINS[slot][3 + step];
+            step += 1;
+        }
+        slot += 1;
+    }
+    steps
+}
+
+static ENVELOPE_STEP_COUNTS: [u8; NUM_ENVELOPES] = envelope_step_counts();
+static ENVELOPE_THRESHOLDS: [u16; NUM_ENVELOPES] = envelope_thresholds();
+
+#[unsafe(link_section = ".rodata.bank125")]
+static ENVELOPE_STEPS: [u8; NUM_ENVELOPES * ENVELOPE_MAX_STEPS] = envelope_steps();
+
+// Resolves an envelope step against the channel's set volume. Both axes are
+// the same 24-level ladder and the ladder is logarithmic, so the product of
+// the two gains is a sum of attenuations, which gt-tracker folds into this
+// table at export. A row is the set volume, a column the envelope step.
+#[unsafe(link_section = ".rodata.bank125")]
+static VOLUME_SCALE: [u8; VOLUME_SCALE_SIZE] =
+    *include_bytes!("../../../assets/envelopes/volume_scale.bin");
+const VOLUME_SCALE_STRIDE: u16 = 32;
+const VOLUME_SCALE_SIZE: usize = 24 * VOLUME_SCALE_STRIDE as usize;
+
 const FX_ID_INSTRUMENT: u8 = 1;
 const FX_ID_ARPEGGIO: u8 = 2;
 const FX_ID_PITCH_UP: u8 = 3;
 const FX_ID_PITCH_DOWN: u8 = 4;
-const FX_ID_FADE_IN: u8 = 5;
-const FX_ID_FADE_OUT: u8 = 6;
-const FX_ID_TREMBLE: u8 = 7;
+const FX_ID_ENVELOPE: u8 = 5;
 
 /// Drives the 7-channel wavetable synth from a gt-tracker export. Create one
 /// sequencer per track, point it at the `<name>_track` descriptor, then call
@@ -75,8 +155,6 @@ static mut BASE_FREQ: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
 const ACTIVE_FX_NONE: u8 = 0;
 const ACTIVE_FX_ARP: u8 = 1;
 const ACTIVE_FX_PITCH: u8 = 2;
-const ACTIVE_FX_FADE: u8 = 3;
-const ACTIVE_FX_TREMBLE: u8 = 4;
 static mut ACTIVE_FX: [u8; VOICE_COUNT] = [ACTIVE_FX_NONE; VOICE_COUNT];
 static mut ARP_X_FREQ: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
 static mut ARP_Y_FREQ: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
@@ -88,19 +166,25 @@ static mut ARP_STEP: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
 static mut PITCH_TARGET: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
 // The glide's current frequency, moved toward PITCH_TARGET by `speed` each tick
 static mut PITCH_CUR: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
-// Track the volume column, so FadeIn/FadeOut know what to
-// glide to/from without needing to read hardware state back
+// Track the volume column, so the channel can be restored
+// without needing to read hardware state back
 static mut CUR_VOL: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
-// Volume the fade is sliding toward (CUR_VOL for FadeIn, 0 for FadeOut)
-static mut FADE_TARGET: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
-// The glide's current volume
-static mut FADE_CUR: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
-// Ticks to hold each Fade volume step, or each Tremble on/off phase.
-static mut VOL_FX_HOLD: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
-// Ticks remaining until the next Fade step or Tremble toggle
-static mut VOL_FX_COUNTER: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
-// Whether the channel is currently in the muted half of its tremble cycle
-static mut TREMBLE_MUTED: [bool; VOICE_COUNT] = [false; VOICE_COUNT];
+// Envelope slot assigned to the channel, persisting across beats like the
+// instrument does. Any other value means no envelope.
+static mut ENV_SLOT: [u8; VOICE_COUNT] = [NUM_ENVELOPES as u8; VOICE_COUNT];
+// Offset of the channel's envelope row in ENVELOPE_STEPS
+static mut ENV_STEP_BASE: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
+// Offset of the channel's set-volume row in VOLUME_SCALE
+static mut ENV_SCALE_BASE: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
+static mut ENV_STEP: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
+static mut ENV_LAST_STEP: [u8; VOICE_COUNT] = [0; VOICE_COUNT];
+// Frame accumulator driving the envelope, advanced by bpm and drained at
+// ENV_THRESHOLD. A zero threshold means the envelope has reached its final
+// step and is holding, so the channel is skipped until the next beat.
+static mut ENV_ACC: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
+static mut ENV_THRESHOLD: [u16; VOICE_COUNT] = [0; VOICE_COUNT];
+// An explicit note OFF holds the envelope silent until a new note or volume
+static mut ENV_SUPPRESSED: [bool; VOICE_COUNT] = [false; VOICE_COUNT];
 
 // See the gt-tracker README for the track descriptor layout
 const TRACK_BPM_OFFSET: usize = 0;
@@ -128,6 +212,11 @@ const VOL_FX_VOLUME_MASK: u8 = 0x1F;
 const VOL_FX_ID_SHIFT: u8 = 5;
 const VOL_FX_ID_MASK: u8 = 0x07;
 const VOL_FX_VOLUME_HOLD: u8 = 0x1F;
+// An explicit note OFF bakes to this code: silence that also suspends the
+// channel's envelope until a new note or an explicit volume arrives.
+const VOL_FX_VOLUME_MUTE: u8 = 0x18;
+
+const BEAT_THRESHOLD: u16 = 3600;
 
 // seq_cmd_type values baked into each pattern's trailing per-beat arrays
 const SEQ_CMD_STOP: u8 = 1;
@@ -170,7 +259,7 @@ impl TrackSequencer {
     // and set the audio_freq register. TODO: channels
     // should default to the first instrument perhaps?
     pub fn init_voices(&self, console: &mut Console, restore_bank: u8) {
-        console.set_rom_bank(INSTRUMENT_BANK);
+        console.set_rom_bank(AUDIO_ASSET_BANK);
         console.audio.load_instruments(&INSTRUMENT_TABLES);
         console.set_rom_bank(restore_bank);
 
@@ -192,7 +281,7 @@ impl TrackSequencer {
         if !self.primed {
             self.primed = true;
             console.set_rom_bank(self.track_bank);
-            self.advance_beat();
+            self.advance_beat(console);
             console.set_rom_bank(restore_bank);
             if self.stopped {
                 return;
@@ -201,30 +290,57 @@ impl TrackSequencer {
 
         self.frame_acc += self.bpm;
 
+        self.advance_envelopes(console, restore_bank);
+
         if self.fx_active_mask != 0 {
             let mut remaining = self.speed;
             while remaining > 0 {
                 // read_volatile prevents LLVM from trying to optimize this into an unsupported `__mulhi3`
                 let bpm = unsafe { core::ptr::read_volatile(&self.bpm) };
                 self.tick_acc += bpm;
+                while self.tick_acc >= BEAT_THRESHOLD {
+                    self.tick_acc -= BEAT_THRESHOLD;
+                    self.advance_tick();
+                }
                 remaining -= 1;
-            }
-
-            while self.tick_acc >= 1800 {
-                self.tick_acc -= 1800;
-                self.advance_tick();
             }
         }
 
-        if self.frame_acc >= 1800 {
-            self.frame_acc -= 1800;
+        if self.frame_acc >= BEAT_THRESHOLD {
+            self.frame_acc -= BEAT_THRESHOLD;
             console.set_rom_bank(self.track_bank);
-            self.advance_beat();
+            self.advance_beat(console);
             console.set_rom_bank(restore_bank);
         }
     }
 
-    // Run sub-tick effects for the channels that still have one running
+    // Walk each channel's volume envelope on the frame clock. Envelopes
+    // span an entire beat, so its threshold is the beat threshold
+    // divided by the step count, which gt-tracker bakes at export.
+    fn advance_envelopes(&mut self, console: &mut Console, restore_bank: u8) {
+        let v = voices();
+        console.set_rom_bank(AUDIO_ASSET_BANK);
+        for ch in 0..VOICE_COUNT {
+            unsafe {
+                if ENV_THRESHOLD[ch] == 0 {
+                    continue;
+                }
+                let bpm = core::ptr::read_volatile(&self.bpm);
+                ENV_ACC[ch] += bpm;
+                while ENV_ACC[ch] >= ENV_THRESHOLD[ch] {
+                    ENV_ACC[ch] -= ENV_THRESHOLD[ch];
+                    ENV_STEP[ch] += 1;
+                    v[ch].set_volume(envelope_volume(ch));
+                    if ENV_STEP[ch] >= ENV_LAST_STEP[ch] {
+                        ENV_THRESHOLD[ch] = 0;
+                        break;
+                    }
+                }
+            }
+        }
+        console.set_rom_bank(restore_bank);
+    }
+
     fn advance_tick(&mut self) {
         let v = voices();
         let speed = self.speed << 2;
@@ -276,35 +392,6 @@ impl TrackSequencer {
                     };
                     PITCH_CUR[ch] = next;
                     v[ch].set_frequency(next);
-                } else if ACTIVE_FX[ch] == ACTIVE_FX_FADE {
-                    if VOL_FX_COUNTER[ch] == 0 {
-                        let cur = FADE_CUR[ch];
-                        let target = FADE_TARGET[ch];
-                        let next = if cur < target {
-                            cur + 1
-                        } else if cur > target {
-                            cur - 1
-                        } else {
-                            cur
-                        };
-                        FADE_CUR[ch] = next;
-                        v[ch].set_volume(next);
-                        if next == target {
-                            ACTIVE_FX[ch] = ACTIVE_FX_NONE;
-                            mask &= !bit;
-                        }
-                        VOL_FX_COUNTER[ch] = VOL_FX_HOLD[ch];
-                    } else {
-                        VOL_FX_COUNTER[ch] -= 1;
-                    }
-                } else if ACTIVE_FX[ch] == ACTIVE_FX_TREMBLE {
-                    if VOL_FX_COUNTER[ch] == 0 {
-                        TREMBLE_MUTED[ch] = !TREMBLE_MUTED[ch];
-                        v[ch].set_volume(if TREMBLE_MUTED[ch] { 0 } else { CUR_VOL[ch] });
-                        VOL_FX_COUNTER[ch] = VOL_FX_HOLD[ch];
-                    } else {
-                        VOL_FX_COUNTER[ch] -= 1;
-                    }
                 }
                 bit <<= 1;
             }
@@ -325,7 +412,7 @@ impl TrackSequencer {
     }
 
     // Processes sequence and channel commands for the current pattern_idx+beat
-    fn advance_beat(&mut self) {
+    fn advance_beat(&mut self, console: &mut Console) {
         loop {
             let pat = self.pattern_ptr(self.pattern_idx);
             let pattern_beats = unsafe { *pat.add(PATTERN_BEATS_OFFSET) } as usize;
@@ -349,7 +436,7 @@ impl TrackSequencer {
                             return;
                         }
                         SEQ_CMD_TEMPO => {
-                            self.bpm = seq_cmd_value as u16;
+                            self.bpm = seq_cmd_value as u16 | ((seq_cmd_value2 as u16) << 8);
                         }
                         SEQ_CMD_SPEED => {
                             self.speed = seq_cmd_value as u16;
@@ -381,6 +468,7 @@ impl TrackSequencer {
             }
 
             self.trigger_channels(data, pattern_beats, beat as usize, channel_mask, fx_mask);
+            self.arm_envelopes(console);
 
             self.beat += 1;
             if (self.beat as usize) >= pattern_beats {
@@ -403,10 +491,10 @@ impl TrackSequencer {
         // channel uses effects. Walking them costs adds rather than a multiply.
         let to_vol_fx = pattern_beats;
         let to_fx_x = to_vol_fx + pattern_beats;
-        let to_fx_freq_x = to_fx_x + pattern_beats;
-        let to_fx_freq_y = to_fx_freq_x + pattern_beats;
+        let to_fx_arg_x = to_fx_x + pattern_beats;
+        let to_fx_arg_y = to_fx_arg_x + pattern_beats;
         let plain_channel = to_fx_x;
-        let fx_channel = to_fx_freq_y + pattern_beats;
+        let fx_channel = to_fx_arg_y + pattern_beats;
 
         let v = voices();
         let mut cur = unsafe { data.add(beat) };
@@ -419,15 +507,15 @@ impl TrackSequencer {
             let mut note_idx = 0u8;
             let mut vol_fx = 0u8;
             let mut fx_x = 0u8;
-            let mut fx_freq_x_idx = 0u8;
-            let mut fx_freq_y_idx = 0u8;
+            let mut fx_arg_x_idx = 0u8;
+            let mut fx_arg_y_idx = 0u8;
             if channel_mask & bit != 0 {
                 note_idx = unsafe { *cur };
                 vol_fx = unsafe { *cur.add(to_vol_fx) };
                 if fx_mask & bit != 0 {
                     fx_x = unsafe { *cur.add(to_fx_x) };
-                    fx_freq_x_idx = unsafe { *cur.add(to_fx_freq_x) };
-                    fx_freq_y_idx = unsafe { *cur.add(to_fx_freq_y) };
+                    fx_arg_x_idx = unsafe { *cur.add(to_fx_arg_x) };
+                    fx_arg_y_idx = unsafe { *cur.add(to_fx_arg_y) };
                     cur = unsafe { cur.add(fx_channel) };
                 } else {
                     cur = unsafe { cur.add(plain_channel) };
@@ -439,38 +527,47 @@ impl TrackSequencer {
             // actually left in a non-resting state.
             let prev_fx = unsafe { ACTIVE_FX[ch] };
             let had_freq_fx = prev_fx == ACTIVE_FX_ARP || prev_fx == ACTIVE_FX_PITCH;
-            let had_vol_fx = prev_fx == ACTIVE_FX_FADE || prev_fx == ACTIVE_FX_TREMBLE;
 
             let new_note = note_idx != 0;
             if new_note {
                 let freq = self.freq(note_idx);
                 unsafe {
                     BASE_FREQ[ch] = freq;
+                    ENV_SUPPRESSED[ch] = false;
                 }
             }
             let vol = vol_fx & VOL_FX_VOLUME_MASK;
-            if vol != VOL_FX_VOLUME_HOLD {
+            if vol == VOL_FX_VOLUME_MUTE {
+                unsafe {
+                    CUR_VOL[ch] = 0;
+                    ENV_SCALE_BASE[ch] = 0;
+                    ENV_SUPPRESSED[ch] = true;
+                }
+                v[ch].set_volume(0);
+            } else if vol != VOL_FX_VOLUME_HOLD {
                 unsafe {
                     CUR_VOL[ch] = vol;
+                    ENV_SCALE_BASE[ch] = (vol as u16) << 5;
+                    ENV_SUPPRESSED[ch] = false;
                 }
                 v[ch].set_volume(vol);
             }
 
             let fx_id = (vol_fx >> VOL_FX_ID_SHIFT) & VOL_FX_ID_MASK;
             if fx_id == FX_ID_ARPEGGIO {
-                let arp_x = self.freq(fx_freq_x_idx);
-                let arp_y = self.freq(fx_freq_y_idx);
+                let arp_x = self.freq(fx_arg_x_idx);
+                let arp_y = self.freq(fx_arg_y_idx);
                 unsafe {
                     ACTIVE_FX[ch] = ACTIVE_FX_ARP;
                     ARP_X_FREQ[ch] = arp_x;
                     ARP_Y_FREQ[ch] = arp_y;
                     // No baked third note means a two-note arpeggio.
-                    ARP_STEP_COUNT[ch] = if fx_freq_y_idx == 0 { 2 } else { 3 };
+                    ARP_STEP_COUNT[ch] = if fx_arg_y_idx == 0 { 2 } else { 3 };
                     ARP_STEP[ch] = 0;
                 }
                 active |= bit;
             } else if fx_id == FX_ID_PITCH_UP || fx_id == FX_ID_PITCH_DOWN {
-                let target = self.freq(fx_freq_x_idx);
+                let target = self.freq(fx_arg_x_idx);
                 unsafe {
                     ACTIVE_FX[ch] = ACTIVE_FX_PITCH;
                     PITCH_TARGET[ch] = target;
@@ -478,26 +575,13 @@ impl TrackSequencer {
                     v[ch].set_frequency(PITCH_CUR[ch]);
                 }
                 active |= bit;
-            } else if fx_id == FX_ID_FADE_IN || fx_id == FX_ID_FADE_OUT {
+            } else if fx_id == FX_ID_ENVELOPE {
                 unsafe {
-                    if CUR_VOL[ch] == 0 {
-                        ACTIVE_FX[ch] = ACTIVE_FX_NONE;
-                        v[ch].set_volume(0);
-                    } else {
-                        ACTIVE_FX[ch] = ACTIVE_FX_FADE;
-                        if fx_id == FX_ID_FADE_IN {
-                            FADE_TARGET[ch] = CUR_VOL[ch];
-                            FADE_CUR[ch] = 0;
-                        } else {
-                            FADE_TARGET[ch] = 0;
-                            FADE_CUR[ch] = CUR_VOL[ch];
-                        }
-                        v[ch].set_volume(FADE_CUR[ch]);
-                        let fade_hold = (fx_x >> 4).max(1);
-                        VOL_FX_HOLD[ch] = fade_hold;
-                        VOL_FX_COUNTER[ch] = fade_hold;
-                        active |= bit;
+                    ENV_SLOT[ch] = fx_x;
+                    if (fx_x as usize) < NUM_ENVELOPES {
+                        ENV_STEP_BASE[ch] = (fx_x as u16) << 5;
                     }
+                    ACTIVE_FX[ch] = ACTIVE_FX_NONE;
                     if new_note || had_freq_fx {
                         v[ch].set_frequency(BASE_FREQ[ch]);
                     }
@@ -509,29 +593,12 @@ impl TrackSequencer {
                     if new_note || had_freq_fx {
                         v[ch].set_frequency(BASE_FREQ[ch]);
                     }
-                    if had_vol_fx {
-                        v[ch].set_volume(CUR_VOL[ch]);
-                    }
                 }
-            } else if fx_id == FX_ID_TREMBLE {
-                unsafe {
-                    ACTIVE_FX[ch] = ACTIVE_FX_TREMBLE;
-                    VOL_FX_HOLD[ch] = fx_x;
-                    VOL_FX_COUNTER[ch] = fx_x;
-                    TREMBLE_MUTED[ch] = false;
-                    if new_note || had_freq_fx {
-                        v[ch].set_frequency(BASE_FREQ[ch]);
-                    }
-                }
-                active |= bit;
             } else {
                 unsafe {
                     ACTIVE_FX[ch] = ACTIVE_FX_NONE;
                     if new_note || had_freq_fx {
                         v[ch].set_frequency(BASE_FREQ[ch]);
-                    }
-                    if had_vol_fx {
-                        v[ch].set_volume(CUR_VOL[ch]);
                     }
                 }
             }
@@ -539,6 +606,41 @@ impl TrackSequencer {
             bit <<= 1;
         }
         self.fx_active_mask = active;
+    }
+
+    fn arm_envelopes(&mut self, console: &mut Console) {
+        let v = voices();
+        console.set_rom_bank(AUDIO_ASSET_BANK);
+        for ch in 0..VOICE_COUNT {
+            unsafe {
+                let slot = ENV_SLOT[ch];
+                if ENV_SUPPRESSED[ch] {
+                    ENV_THRESHOLD[ch] = 0;
+                } else if slot as usize >= NUM_ENVELOPES {
+                    ENV_THRESHOLD[ch] = 0;
+                    v[ch].set_volume(CUR_VOL[ch]);
+                } else {
+                    let last_step = ENVELOPE_STEP_COUNTS[slot as usize] - 1;
+                    ENV_LAST_STEP[ch] = last_step;
+                    ENV_STEP[ch] = 0;
+                    ENV_ACC[ch] = 0;
+                    ENV_THRESHOLD[ch] = if last_step == 0 {
+                        0
+                    } else {
+                        ENVELOPE_THRESHOLDS[slot as usize]
+                    };
+                    v[ch].set_volume(envelope_volume(ch));
+                }
+            }
+        }
+        console.set_rom_bank(self.track_bank);
+    }
+}
+
+unsafe fn envelope_volume(ch: usize) -> u8 {
+    unsafe {
+        let step = ENVELOPE_STEPS[(ENV_STEP_BASE[ch] + ENV_STEP[ch] as u16) as usize];
+        VOLUME_SCALE[(ENV_SCALE_BASE[ch] + step as u16) as usize]
     }
 }
 

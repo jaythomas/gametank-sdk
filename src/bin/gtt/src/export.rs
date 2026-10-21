@@ -5,9 +5,11 @@ use std::path::Path;
 use crate::file::{NUM_INSTRUMENTS, TrackerFile};
 use crate::sample_rate::{SAMPLE_RATE_REG, sample_rate_reg_to_hz};
 use crate::tracker::{
-    ChannelCmd, FX_ID_ARPEGGIO, FX_ID_FADE_IN, FX_ID_FADE_OUT, FX_ID_INSTRUMENT, FX_ID_NONE,
-    FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, FX_ID_TREMBLE, MAX_VOLUME, SequencerCmd,
+    BEAT_THRESHOLD, ChannelCmd, ENVELOPE_MAX_STEPS, FX_ID_ARPEGGIO, FX_ID_ENVELOPE,
+    FX_ID_INSTRUMENT, FX_ID_NONE, FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, MAX_VOLUME, NUM_ENVELOPES,
+    SequencerCmd,
 };
+use crate::volume_scale::scale_table;
 
 const CHANNELS: usize = 7;
 
@@ -21,10 +23,13 @@ const MAX_FREQ_ENTRIES: usize = 256;
 const PATTERN_HAS_SEQ: u8 = 0x80;
 
 // vol_fx byte: volume in the low five bits, effect ID in the top three. The
-// volume needs 24 values, which leaves 31 spare to mean "leave it alone" - a
-// sentinel rather than a flag bit, because there is no eighth bit to spare.
+// volume needs 24 values, so the eight spare codes carry meaning the byte has
+// no room to flag. 31 means "leave the volume alone"; 24 means silence that
+// also suppresses the envelope, which is what separates a note OFF from a
+// volume the user deliberately set to zero.
 const VOL_FX_ID_SHIFT: u8 = 5;
 const VOL_FX_VOLUME_HOLD: u8 = 0x1F;
+const VOL_FX_VOLUME_MUTE: u8 = 0x18;
 
 const ARP_NO_THIRD_NOTE: u8 = 0xFF;
 
@@ -76,8 +81,8 @@ struct Cell {
     vol: Option<u8>,
     fx_id: u8,
     fx_x: u8,
-    fx_freq_x: u16,
-    fx_freq_y: u16,
+    fx_arg_x: u16,
+    fx_arg_y: u16,
 }
 
 impl Cell {
@@ -157,16 +162,8 @@ fn bake_pattern(
                         fx_id = FX_ID_PITCH_DOWN;
                         fx_x = *x;
                     }
-                    ChannelCmd::FadeIn(x) => {
-                        fx_id = FX_ID_FADE_IN;
-                        fx_x = *x;
-                    }
-                    ChannelCmd::FadeOut(x) => {
-                        fx_id = FX_ID_FADE_OUT;
-                        fx_x = *x;
-                    }
-                    ChannelCmd::Tremble(x) => {
-                        fx_id = FX_ID_TREMBLE;
+                    ChannelCmd::Envelope(x) => {
+                        fx_id = FX_ID_ENVELOPE;
                         fx_x = *x;
                     }
                     _ => {}
@@ -179,7 +176,7 @@ fn bake_pattern(
                 Some(v)
             } else if has_note_off {
                 muted = true;
-                Some(0)
+                Some(VOL_FX_VOLUME_MUTE)
             } else if has_note && muted {
                 muted = false;
                 Some(remembered_vol)
@@ -187,23 +184,23 @@ fn bake_pattern(
                 None
             };
 
-            let (mut fx_freq_x, mut fx_freq_y) = (0u16, 0u16);
+            let (mut fx_arg_x, mut fx_arg_y) = (0u16, 0u16);
             if fx_id == FX_ID_ARPEGGIO
                 && let Some(name) = &cur_note_name
             {
-                fx_freq_x = arp_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(0);
+                fx_arg_x = arp_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(0);
                 if fx_y != ARP_NO_THIRD_NOTE {
-                    fx_freq_y = arp_offset_freq_inc(file, name, fx_y, sample_rate_hz).unwrap_or(0);
+                    fx_arg_y = arp_offset_freq_inc(file, name, fx_y, sample_rate_hz).unwrap_or(0);
                 }
             } else if fx_id == FX_ID_PITCH_UP
                 && let Some(name) = &cur_note_name
             {
-                fx_freq_x =
+                fx_arg_x =
                     arp_offset_freq_inc(file, name, fx_x, sample_rate_hz).unwrap_or(cur_freq);
             } else if fx_id == FX_ID_PITCH_DOWN
                 && let Some(name) = &cur_note_name
             {
-                fx_freq_x = pitch_down_offset_freq_inc(file, name, fx_x, sample_rate_hz)
+                fx_arg_x = pitch_down_offset_freq_inc(file, name, fx_x, sample_rate_hz)
                     .unwrap_or(cur_freq);
             }
 
@@ -212,8 +209,8 @@ fn bake_pattern(
                 vol: vol_out,
                 fx_id,
                 fx_x,
-                fx_freq_x,
-                fx_freq_y,
+                fx_arg_x,
+                fx_arg_y,
             };
         }
     }
@@ -225,7 +222,9 @@ fn bake_pattern(
     for beat in 0..beats {
         let encoded = match &pattern[0][beat].sqc {
             Some(SequencerCmd::Stop) => (SEQ_CMD_STOP, 0u8, 0u8),
-            Some(SequencerCmd::Tempo(bpm)) => (SEQ_CMD_TEMPO, *bpm, 0u8),
+            Some(SequencerCmd::Tempo(bpm)) => {
+                (SEQ_CMD_TEMPO, (*bpm & 0xFF) as u8, (*bpm >> 8) as u8)
+            }
             Some(SequencerCmd::FxSpeed(fx_speed)) => (SEQ_CMD_FX_SPEED, *fx_speed, 0u8),
             Some(SequencerCmd::FlowCount(count)) => (SEQ_CMD_FLOW_COUNT, *count, 0u8),
             Some(SequencerCmd::CountJump(pat, beat_target)) => {
@@ -315,10 +314,7 @@ fn serialize_pattern(pattern: &BakedPattern, freqs: &mut FreqTable) -> io::Resul
         }
         for cell in cells {
             let mut vol_fx = cell.fx_id << VOL_FX_ID_SHIFT;
-            vol_fx |= match cell.vol {
-                Some(v) => v.min(MAX_VOLUME),
-                None => VOL_FX_VOLUME_HOLD,
-            };
+            vol_fx |= cell.vol.unwrap_or(VOL_FX_VOLUME_HOLD);
             out.push(vol_fx);
         }
 
@@ -329,10 +325,10 @@ fn serialize_pattern(pattern: &BakedPattern, freqs: &mut FreqTable) -> io::Resul
             out.push(cell.fx_x);
         }
         for cell in cells {
-            out.push(freqs.intern(cell.fx_freq_x)?);
+            out.push(freqs.intern(cell.fx_arg_x)?);
         }
         for cell in cells {
-            out.push(freqs.intern(cell.fx_freq_y)?);
+            out.push(freqs.intern(cell.fx_arg_y)?);
         }
     }
 
@@ -372,6 +368,22 @@ fn build_track_bin(bpm: u16, fx_speed: u8, baked: &[BakedPattern]) -> io::Result
     Ok(out)
 }
 
+/// Serialize one envelope: step count, the accumulator threshold that spreads
+/// those steps across a beat, then the steps themselves padded to a fixed
+/// width so the firmware can index them without parsing.
+fn build_envelope_bin(steps: &[u8]) -> Vec<u8> {
+    let count = steps.len().clamp(1, ENVELOPE_MAX_STEPS);
+    let threshold = BEAT_THRESHOLD / count as u16;
+    let last = steps[count - 1];
+
+    let mut out = Vec::with_capacity(3 + ENVELOPE_MAX_STEPS);
+    out.push(count as u8);
+    out.extend_from_slice(&threshold.to_le_bytes());
+    out.extend_from_slice(&steps[..count]);
+    out.resize(3 + ENVELOPE_MAX_STEPS, last);
+    out
+}
+
 pub fn export_all(
     file: &TrackerFile,
     bpm: u16,
@@ -402,6 +414,15 @@ pub fn export_all(
         let path = instruments_dir.join(format!("instrument_{}.bin", i));
         std::fs::write(path, &file.instruments[i].waveform)?;
     }
+
+    let envelopes_dir = export_dir.join("envelopes");
+    std::fs::create_dir_all(&envelopes_dir)?;
+
+    for i in 0..NUM_ENVELOPES {
+        let path = envelopes_dir.join(format!("envelope_{}.bin", i));
+        std::fs::write(path, build_envelope_bin(&file.envelope_steps(i)))?;
+    }
+    std::fs::write(envelopes_dir.join("volume_scale.bin"), scale_table())?;
 
     std::fs::write(export_dir.join(format!("{}.bin", stem)), track_bin)?;
 

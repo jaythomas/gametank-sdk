@@ -14,12 +14,22 @@ pub const FX_ID_INSTRUMENT: u8 = 1;
 pub const FX_ID_ARPEGGIO: u8 = 2;
 pub const FX_ID_PITCH_UP: u8 = 3;
 pub const FX_ID_PITCH_DOWN: u8 = 4;
-pub const FX_ID_FADE_IN: u8 = 5;
-pub const FX_ID_FADE_OUT: u8 = 6;
-pub const FX_ID_TREMBLE: u8 = 7;
-pub const MAX_FX_ID: u8 = FX_ID_TREMBLE;
+pub const FX_ID_ENVELOPE: u8 = 5;
+pub const MAX_FX_ID: u8 = FX_ID_ENVELOPE;
 pub const MAX_INSTRUMENT_INDEX: u8 = crate::file::NUM_INSTRUMENTS as u8 - 1;
-pub const FX_TICKS_MAX: u8 = 0x3B;
+pub const WAVEFORM_SAMPLES: usize = 256;
+pub const BEAT_THRESHOLD: u16 = 3600;
+pub const MAX_TEMPO: u16 = 1800;
+
+pub const NUM_ENVELOPES: usize = 8;
+pub const MAX_ENVELOPE_INDEX: u8 = NUM_ENVELOPES as u8 - 1;
+pub const ENVELOPE_MAX_STEPS: usize = 32;
+
+/// Resolve an Envelope Fx parameter to a slot. Anything above the last
+/// assigned slot leaves the channel without an envelope.
+pub fn envelope_slot(param: u8) -> Option<usize> {
+    (param <= MAX_ENVELOPE_INDEX).then_some(param as usize)
+}
 
 /// Number of distinct volume levels the firmware provides. Levels are 1.3 dB
 /// apart at the top, widening to 3.5 dB at the bottom, so each step is a roughly equal-sounding jump rather than an equal
@@ -43,9 +53,7 @@ impl Beat {
             ChannelCmd::Arpeggio(x, y) => Some((FX_ID_ARPEGGIO, *x, *y)),
             ChannelCmd::PitchUp(x) => Some((FX_ID_PITCH_UP, *x, None)),
             ChannelCmd::PitchDown(x) => Some((FX_ID_PITCH_DOWN, *x, None)),
-            ChannelCmd::FadeIn(x) => Some((FX_ID_FADE_IN, *x, None)),
-            ChannelCmd::FadeOut(x) => Some((FX_ID_FADE_OUT, *x, None)),
-            ChannelCmd::Tremble(x) => Some((FX_ID_TREMBLE, *x, None)),
+            ChannelCmd::Envelope(x) => Some((FX_ID_ENVELOPE, *x, None)),
             _ => None,
         })
     }
@@ -58,7 +66,7 @@ pub enum SequencerCmd {
     // Load(u8, u16),
     // Pattern(u8),
     Stop,
-    Tempo(u8),
+    Tempo(u16),
     FxSpeed(u8),
     FlowCount(u8),
     CountJump(u8, u8),
@@ -74,6 +82,9 @@ pub enum ChannelCmd {
     Arpeggio(u8, Option<u8>),
     PitchUp(u8),
     PitchDown(u8),
+    Envelope(u8),
+    // Retired in schema version 1. Kept so version 0 files still deserialize;
+    // `TrackerFile::load` strips them during migration.
     FadeIn(u8),
     FadeOut(u8),
     Tremble(u8),

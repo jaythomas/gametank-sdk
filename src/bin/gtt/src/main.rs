@@ -11,6 +11,7 @@ mod player;
 mod sample_rate;
 mod scheme;
 mod tracker;
+mod volume_scale;
 
 use clap::Parser;
 use cli_args::CommandLineArgs;

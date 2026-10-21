@@ -19,9 +19,9 @@ use crate::{
     lane::{Lane, LaneKind},
     scheme::SCHEME,
     tracker::{
-        Beat, ChannelCmd, FX_ID_ARPEGGIO, FX_ID_FADE_IN, FX_ID_FADE_OUT, FX_ID_INSTRUMENT,
-        FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, FX_ID_TREMBLE, FX_TICKS_MAX, MAX_FX_ID,
-        MAX_INSTRUMENT_INDEX, MAX_VOLUME, Pattern, SequencerCmd,
+        Beat, ChannelCmd, FX_ID_ARPEGGIO, FX_ID_ENVELOPE, FX_ID_INSTRUMENT, FX_ID_PITCH_DOWN,
+        FX_ID_PITCH_UP, MAX_FX_ID, MAX_INSTRUMENT_INDEX, MAX_TEMPO, MAX_VOLUME, Pattern,
+        SequencerCmd,
     },
 };
 
@@ -57,30 +57,38 @@ fn seq_cmd_shorthand(cmd: &SequencerCmd) -> (char, ratatui::style::Color) {
     }
 }
 
-fn seq_cmd_args(cmd: &SequencerCmd) -> Vec<u8> {
+enum SeqArgs {
+    None,
+    Byte(u8),
+    Word(u16),
+    Pair(u8, u8),
+}
+
+fn seq_cmd_args(cmd: &SequencerCmd) -> SeqArgs {
     match cmd {
-        SequencerCmd::Stop => vec![],
-        SequencerCmd::Tempo(v) | SequencerCmd::FxSpeed(v) | SequencerCmd::FlowCount(v) => {
-            vec![*v]
-        }
-        SequencerCmd::CountJump(p, b) => vec![*p, *b],
-        SequencerCmd::Jump(p, b) => vec![*p, *b],
+        SequencerCmd::Stop => SeqArgs::None,
+        SequencerCmd::Tempo(v) => SeqArgs::Word(*v),
+        SequencerCmd::FxSpeed(v) | SequencerCmd::FlowCount(v) => SeqArgs::Byte(*v),
+        SequencerCmd::CountJump(p, b) => SeqArgs::Pair(*p, *b),
+        SequencerCmd::Jump(p, b) => SeqArgs::Pair(*p, *b),
     }
 }
 
 fn seq_cmd_single_arg_max(cmd: &SequencerCmd) -> Option<u8> {
     match cmd {
-        SequencerCmd::Tempo(_) => Some(255),
         SequencerCmd::FxSpeed(_) => Some(31),
         SequencerCmd::FlowCount(_) => Some(255),
-        SequencerCmd::Stop | SequencerCmd::CountJump(_, _) | SequencerCmd::Jump(_, _) => None,
+        SequencerCmd::Stop
+        | SequencerCmd::Tempo(_)
+        | SequencerCmd::CountJump(_, _)
+        | SequencerCmd::Jump(_, _) => None,
     }
 }
 
 fn seq_cmd_set_arg0(cmd: &SequencerCmd, v: u8) -> SequencerCmd {
     match cmd {
         SequencerCmd::Stop => SequencerCmd::Stop,
-        SequencerCmd::Tempo(_) => SequencerCmd::Tempo(v),
+        SequencerCmd::Tempo(t) => SequencerCmd::Tempo(*t),
         SequencerCmd::FxSpeed(_) => SequencerCmd::FxSpeed(v),
         SequencerCmd::FlowCount(_) => SequencerCmd::FlowCount(v),
         SequencerCmd::CountJump(_, b) => SequencerCmd::CountJump(v, *b),
@@ -91,7 +99,7 @@ fn seq_cmd_set_arg0(cmd: &SequencerCmd, v: u8) -> SequencerCmd {
 fn seq_cmd_set_arg2(cmd: &SequencerCmd, v: u8, b: u8) -> SequencerCmd {
     match cmd {
         SequencerCmd::Stop => SequencerCmd::Stop,
-        SequencerCmd::Tempo(_) => SequencerCmd::Tempo(v),
+        SequencerCmd::Tempo(t) => SequencerCmd::Tempo(*t),
         SequencerCmd::FxSpeed(_) => SequencerCmd::FxSpeed(v),
         SequencerCmd::FlowCount(_) => SequencerCmd::FlowCount(v),
         SequencerCmd::CountJump(_, _) => SequencerCmd::CountJump(v, b),
@@ -126,8 +134,28 @@ fn seq_choice_default(idx: usize) -> Option<SequencerCmd> {
 fn fx_x_max(fx_id: u8) -> u8 {
     match fx_id {
         FX_ID_INSTRUMENT => MAX_INSTRUMENT_INDEX,
-        FX_ID_FADE_IN | FX_ID_FADE_OUT | FX_ID_TREMBLE => FX_TICKS_MAX,
         _ => 0xFF,
+    }
+}
+
+fn set_beat_fx(beat: &mut Beat, fx_id: u8, fx_x: u8, fx_y: Option<u8>) {
+    beat.cmd_list.retain(|c| {
+        !matches!(
+            c,
+            ChannelCmd::Instrument(_)
+                | ChannelCmd::Arpeggio(_, _)
+                | ChannelCmd::PitchUp(_)
+                | ChannelCmd::PitchDown(_)
+                | ChannelCmd::Envelope(_)
+        )
+    });
+    match fx_id {
+        FX_ID_INSTRUMENT => beat.cmd_list.push(ChannelCmd::Instrument(fx_x)),
+        FX_ID_ARPEGGIO => beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y)),
+        FX_ID_PITCH_UP => beat.cmd_list.push(ChannelCmd::PitchUp(fx_x)),
+        FX_ID_PITCH_DOWN => beat.cmd_list.push(ChannelCmd::PitchDown(fx_x)),
+        FX_ID_ENVELOPE => beat.cmd_list.push(ChannelCmd::Envelope(fx_x)),
+        _ => {}
     }
 }
 
@@ -311,12 +339,11 @@ impl CellDisplay {
                 None => "-----".to_string(),
                 Some(cmd) => {
                     let (glyph, _) = seq_cmd_shorthand(cmd);
-                    let args = seq_cmd_args(cmd);
-                    match args.as_slice() {
-                        [] => format!("{:>5}", glyph),
-                        [v] => format!("{}{:>4}", glyph, format!("{:02X}", v)),
-                        [p, b] => format!("{}{:02X}{:02X}", glyph, p, b),
-                        _ => unreachable!(),
+                    match seq_cmd_args(cmd) {
+                        SeqArgs::None => format!("{:>5}", glyph),
+                        SeqArgs::Byte(v) => format!("{}{:>4}", glyph, format!("{:02X}", v)),
+                        SeqArgs::Word(v) => format!("{}{:04X}", glyph, v),
+                        SeqArgs::Pair(p, b) => format!("{}{:02X}{:02X}", glyph, p, b),
                     }
                 }
             },
@@ -703,30 +730,7 @@ impl Component for PatternEditor {
 
                         let pattern = file.current_pattern_mut(self.pattern_idx);
                         let beat = &mut pattern[channel + 1][row];
-                        beat.cmd_list.retain(|c| {
-                            !matches!(
-                                c,
-                                ChannelCmd::Instrument(_)
-                                    | ChannelCmd::Arpeggio(_, _)
-                                    | ChannelCmd::PitchUp(_)
-                                    | ChannelCmd::PitchDown(_)
-                                    | ChannelCmd::FadeIn(_)
-                                    | ChannelCmd::FadeOut(_)
-                                    | ChannelCmd::Tremble(_)
-                            )
-                        });
-                        match fx_id {
-                            FX_ID_INSTRUMENT => {
-                                beat.cmd_list.push(ChannelCmd::Instrument(fx_x))
-                            }
-                            FX_ID_ARPEGGIO => beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y)),
-                            FX_ID_PITCH_UP => beat.cmd_list.push(ChannelCmd::PitchUp(fx_x)),
-                            FX_ID_PITCH_DOWN => beat.cmd_list.push(ChannelCmd::PitchDown(fx_x)),
-                            FX_ID_FADE_IN => beat.cmd_list.push(ChannelCmd::FadeIn(fx_x)),
-                            FX_ID_FADE_OUT => beat.cmd_list.push(ChannelCmd::FadeOut(fx_x)),
-                            FX_ID_TREMBLE => beat.cmd_list.push(ChannelCmd::Tremble(fx_x)),
-                            _ => {}
-                        }
+                        set_beat_fx(beat, fx_id, fx_x, fx_y);
                     }
                     Event::Key(KeyEvent {
                         code,
@@ -764,34 +768,7 @@ impl Component for PatternEditor {
 
                             let pattern = file.current_pattern_mut(self.pattern_idx);
                             let beat = &mut pattern[channel + 1][row];
-                            beat.cmd_list.retain(|c| {
-                                !matches!(
-                                    c,
-                                    ChannelCmd::Instrument(_)
-                                        | ChannelCmd::Arpeggio(_, _)
-                                        | ChannelCmd::PitchUp(_)
-                                        | ChannelCmd::PitchDown(_)
-                                        | ChannelCmd::FadeIn(_)
-                                        | ChannelCmd::FadeOut(_)
-                                        | ChannelCmd::Tremble(_)
-                                )
-                            });
-                            match fx_id {
-                                FX_ID_INSTRUMENT => {
-                                    beat.cmd_list.push(ChannelCmd::Instrument(fx_x))
-                                }
-                                FX_ID_ARPEGGIO => {
-                                    beat.cmd_list.push(ChannelCmd::Arpeggio(fx_x, fx_y))
-                                }
-                                FX_ID_PITCH_UP => beat.cmd_list.push(ChannelCmd::PitchUp(fx_x)),
-                                FX_ID_PITCH_DOWN => {
-                                    beat.cmd_list.push(ChannelCmd::PitchDown(fx_x))
-                                }
-                                FX_ID_FADE_IN => beat.cmd_list.push(ChannelCmd::FadeIn(fx_x)),
-                                FX_ID_FADE_OUT => beat.cmd_list.push(ChannelCmd::FadeOut(fx_x)),
-                                FX_ID_TREMBLE => beat.cmd_list.push(ChannelCmd::Tremble(fx_x)),
-                                _ => {}
-                            }
+                            set_beat_fx(beat, fx_id, fx_x, fx_y);
                         }
                     }
                     _ => {}
@@ -868,8 +845,14 @@ impl Component for PatternEditor {
                             let max_pattern = (file.patterns.len().max(1) - 1) as u8;
 
                             let new_sqc = match &current_sqc {
-                                Some(cmd @ (SequencerCmd::Tempo(v)
-                                | SequencerCmd::FxSpeed(v)
+                                Some(SequencerCmd::Tempo(v)) => {
+                                    let prev = if digits_typed == 0 { 0 } else { *v };
+                                    let value =
+                                        (prev as u32 * 16 + digit as u32).min(MAX_TEMPO as u32) as u16;
+                                    self.seq_edit = Some((cell, (digits_typed + 1).min(4)));
+                                    Some(SequencerCmd::Tempo(value))
+                                }
+                                Some(cmd @ (SequencerCmd::FxSpeed(v)
                                 | SequencerCmd::FlowCount(v))) => {
                                     let max = seq_cmd_single_arg_max(cmd).unwrap();
                                     let prev = if digits_typed == 0 { 0 } else { *v };
@@ -911,8 +894,15 @@ impl Component for PatternEditor {
                             let inc = *code == keybinds::VOL_INCREMENT;
 
                             let new_sqc = match &current_sqc {
-                                Some(cmd @ (SequencerCmd::Tempo(v)
-                                | SequencerCmd::FxSpeed(v)
+                                Some(SequencerCmd::Tempo(v)) => {
+                                    let value = if inc {
+                                        v.saturating_add(1).min(MAX_TEMPO)
+                                    } else {
+                                        v.saturating_sub(1)
+                                    };
+                                    Some(SequencerCmd::Tempo(value))
+                                }
+                                Some(cmd @ (SequencerCmd::FxSpeed(v)
                                 | SequencerCmd::FlowCount(v))) => {
                                     let max = seq_cmd_single_arg_max(cmd).unwrap();
                                     let value = if inc {

@@ -14,9 +14,11 @@ A music editor/tracker for the [GameTank](https://gametank.zone/).
 - [Control deck](#control-deck)
 - [Command palette](#command-palette)
 - [Instrument editor](#instrument-editor)
+- [Envelope editor](#envelope-editor)
 - [Tuning editor](#tuning-editor)
 - [Using your tracks](#using-your-tracks)
 - [Track descriptor reference](#track-descriptor-reference)
+- [Envelope reference](#envelope-reference)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -61,7 +63,7 @@ Use Enter/Up/Down/Esc on a SEQ cell to select a sequencer command.
 | -- | -----           | ----------                                     | -----------           |
 | 0  | (no effect)     |                                                |                       |
 | 1  | `[S]top`        | (none)                                         | Ends track playback   |
-| 2  | `[T]empo`       | x = tempo                                      | Updates the track BPM |
+| 2  | `[T]empo`       | x (0001-0708) = beats per minute               | Updates the track BPM |
 | 3  | `F[x]Speed`     | x (00-1F) = number of ticks per beat           | How many ticks per beat channel effects advance. (Higher is faster.) |
 | 4  | `[#] FlowCount` | x (00-FF) = value for "count" register         | Replace the value of the count register. Any number greater than 0 will trigger the conditional "CountJump". | 
 | 5  | `Count[j]ump`   | x (00-FF) = pattern idx, y (00-FF) = beat idx  | When the count register is greater than 0, jump to the given pattern+beat, then decrement the count register by 1. Essential for looping a section of track a finite number of times. When the register is 0, this command does nothing. |
@@ -97,15 +99,13 @@ See the [Tuning editor](#tuning-editor) for how to update these mappings.
 | 2  | Arpeggio    | x (0-F) = how many steps up to the second note,<br>y (0-F) = optional, steps up for a third note. | The arpeggiation steps to its next note once per tick, and FxSpeed sets how many ticks occur per beat. So an FxSpeed of `05` yields 3 ticks/notes a beat. |
 | 3  | PitchUp     | x (00-FF) = how many steps up to slide to                | Portamento that increments at a rate of FxSpeed. |
 | 4  | PitchDown   | x (00-FF) = how many steps down to slide to              | Portamento that decrements at a rate of FxSpeed. |
-| 5  | FadeIn      | x (00-3B) = how many ticks to hold each volume step      | Play note with a volume of 0 and raise volume up at a rate of `x` until reaching set volume or the beat ends. |
-| 6  | FadeOut     | x (00-3B) = how many ticks to hold each volume step      | Play note at the volume level set for the beat and lower volume down to 0 at a rate of `x`. |
-| 7  | Tremble     | x (00-3B) = how many ticks to hold a note off then on    | Hard tremolo. Rapidly play and mute a note. |
+| 5  | Envelope    | x (00-07) = envelope slot, any higher value = off        | Assign a volume envelope to the channel. Like the instrument, the assignment persists across beats until changed. Assign a value of `08` or higher (`FF` by convention) to remove any envelope on a channel. |
 
 ## Control deck
 
 The control deck allows you to edit global track parameters, pattern-level parameters, as well as convenient buttons for common Command palette (`:command`) actions.
 
-**BPM** is the global BPM.
+**BPM** is the global BPM, entered in hex from 0001 to 0708 (1-1800).
 
 **Beats** changes the length of the current pattern.
 
@@ -113,7 +113,9 @@ The control deck allows you to edit global track parameters, pattern-level param
 
 **FxSpeed** is the starting effects speed for the track (see **SEQ** commands for more details).
 
-**Instruments** - there are 8 total instruments, which can be swapped out on any beat on any channel to provide a lot of versatility. The 8 instruments can be renamed from here, and their waveforms opened in the instrument editor from the `[⚙]` buttons. In a new track, instrument 6 (the one channel 6 plays by default) starts out as white noise so there is a percussion channel ready to go; the rest start as square waves.
+**Instruments** - there are 8 total instruments, which can be swapped out on any beat on any channel to provide a lot of versatility. Instruments can be renamed from here, and their waveforms opened in the instrument editor from the `[⚙]` buttons. A new track starts with a spread of basic waveforms and two noise instruments.
+
+**Envelopes** - there are 8 total volume envelopes, assigned to a channel with the Envelope effect the same way an instrument is. They can be renamed from here, and their shapes opened in the [envelope editor](#envelope-editor) from the `[⚙]` buttons.
 
 **Tuning editor** opens the [tuning editor](#tuning-editor) for key assignment.
 
@@ -136,6 +138,7 @@ Press Enter to execute or Esc to cancel the command input.
 | -------          | -----------                             |
 | `:exp`/`:export` | export track                            |
 | `:instrument`    | open instrument editor                  |
+| `:envelope`      | open envelope editor                    |
 | `:m`             | toggle mute on the active voice channel |
 | `:mute`/`:unmute`| mute/unmute the active voice channel    |
 | `:q`/`:quit`     | quit the application                    |
@@ -164,6 +167,27 @@ Each byte is an unsigned 8-bit PCM sample:
 For exporting and importing, you can use the `[Export]` button on the Control Deck to export out the raw waveform from a given track, then within the instrument editor use the `[Import]` button to slot in an instrument waveform you already made.
 
 Simply click `[Cancel]` or `[Save]` when done.
+
+## Envelope editor
+
+![gt-tracker envelope editor screenshot](./screenshot3.png)
+
+This gives you control to turn the wave samples into things that mimmick instruments and sounds in the real word.
+A noise channel with a sharp attack or sharp decay could become a percussion.
+A release allows a single note across beats to be broken up into distinct key presses.
+
+An envelope describes the volume of a voice over the span of a beat.
+Any of the envelopes can be assigned to any of the channels.
+The header fields set Length plus the Attack, Decay, Sustain and Release parameters.
+Each step is a value between `00`-`17` just like channel value.
+In other words, this is the level this would play at if the channel volume were `17`. The shape is therefore proportional at different set volumes.
+
+Length is the number of steps, 1 to 32, and is purely a resolution choice.
+Because an envelope always fills one beat, a 4-step envelope is four coarse levels and a 32-step envelope is a smooth glide, and both behave the same at any tempo.
+Bars can be adjusted like in the instrument editor.
+`[Generate]` fills the grid from them, growing Length if the attack, decay and release need more steps than the current length, and holding the sustain level across whatever steps remain.
+`[Import]` loads an exported `envelope_<n>.bin`.
+Click `[Cancel]` or `[Save]` when done.
 
 ## Tuning editor
 
@@ -194,13 +218,14 @@ Clicking **Export** creates a `<name>-export/` folder next to your gt-tracker fi
 ```
 mycooltrack-export/
   instruments/         instrument raw waveform files
+  envelopes/           envelope shapes and the volume scale table
   mycooltrack.bin      pattern data, ready to embed
 ```
 
 Follow the instructions for your SDK on how to incorporate the track data into your project.
 
-- [C SDK](https://github.com/clydeshaffer/gametank_sdk)
-- [Rust SDK](https://github.com/dwbrite/gametank-sdk)
+- [C SDK](https://github.com/clydeshaffer/gametank_sdk) - use the external [gttAudio module](https://codeberg.org/jaythomas/gttAudio)
+- [Rust SDK](https://github.com/dwbrite/gametank-sdk) - already integrated (see README)
 
 
 ## Track descriptor reference
@@ -256,7 +281,7 @@ seq_count entries of 4 bytes each:
   beat    sequence command's beat index within the pattern
   cmd     sequence command ID (see SEQ definitions above)
   value   raw command value (unused for Stop; pattern index for Jump/CountJump)
-  value2  second raw command value (target beat for Jump/CountJump)
+  value2  second raw command value (target beat for Jump/CountJump, high byte for Tempo)
 ```
 
 The channel arrays come last, one group per channel flagged in `channel_mask`, in
@@ -266,14 +291,33 @@ ascending channel order. Each array is `beats` bytes long:
 note_idx[beats]       frequency table index for the beat's note; 0 = no note
 vol_fx[beats]         packed volume and effect ID, see below
 only when the channel's fx_mask bit is set:
-  fx_x[beats]           raw effect parameter (instrument slot, or fade/tremble hold ticks)
-  fx_freq_x_idx[beats]  frequency table index for the baked fx_x target (Arpeggio's +x note, or PitchUp/PitchDown's slide target)
-  fx_freq_y_idx[beats]  frequency table index for Arpeggio's +y note; 0 = two-note arpeggio
+  fx_x[beats]           raw effect parameter (instrument slot, or envelope slot where anything past 07 means off)
+  fx_arg_x_idx[beats]  frequency table index for the baked fx_x target (Arpeggio's +x note, or PitchUp/PitchDown's slide target)
+  fx_arg_y_idx[beats]  frequency table index for Arpeggio's +y note; 0 = two-note arpeggio
 ```
 
 `vol_fx` packs both per-beat values a channel almost always needs into one byte:
 
 | bits  | field       | description                                                             |
 | ----- | -----       | -----------                                                             |
-| 0-4   | `volume`    | Volume 0-23; 31 means hold the channel's previous volume                |
+| 0-4   | `volume`    | Volume 0-23; 24 is a note OFF, which silences the channel and suspends its envelope; 31 means hold the channel's previous volume |
 | 5-7   | `fx_id`     | Channel effect ID 1-7 (see channel FX definitions above); 0 = no effect |
+
+## Envelope reference
+
+The `envelopes/` folder holds one `envelope_<n>.bin` per slot, each 35 bytes:
+
+```
+step_count    number of steps used, 1-32
+threshold_lo  low byte of the per-step accumulator threshold
+threshold_hi  high byte of the per-step accumulator threshold
+steps[32]     one level per step on the 0-23 volume ladder
+```
+
+Envelopes span an entire beat, so the threshold is the beat threshold divided by `step_count`, computed at export.
+Steps past `step_count` repeat the last used step so the array is a fixed stride, letting a player index a slot's row with a shift.
+
+`volume_scale.bin` is a 768-byte table that resolves an envelope step against the channel's set volume.
+Rows are the set volume and columns the envelope step, with a row stride of 32 so the row offset is also a shift.
+Both axes are the same logarithmic ladder, so combining two gains is a sum of attenuations, again, folded into this table at export rather than multiplied at runtime.
+Columns 24-31 pad each row with the set volume.

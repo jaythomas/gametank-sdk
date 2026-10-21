@@ -12,7 +12,7 @@ use crate::{
     components::{ControlDeck, pattern_editor::PatternEditor},
     file::{NUM_INSTRUMENTS, TrackerFile, TuningData},
     scheme::SCHEME,
-    tracker::PATTERN_TABLE_WIDTH,
+    tracker::{NUM_ENVELOPES, PATTERN_TABLE_WIDTH},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +40,7 @@ impl TrackerContainer {
     pub fn init(file: &TrackerFile) -> Self {
         let mut control_deck = ControlDeck::init();
         control_deck.set_names(&file.instrument_names());
+        control_deck.set_envelope_names(&file.envelope_names());
         control_deck.set_bpm(file.bpm);
         control_deck.set_fx_speed(file.fx_speed);
         control_deck.set_beats(file.beats_for(0));
@@ -56,6 +57,10 @@ impl TrackerContainer {
 
     pub fn get_instrument_names(&self) -> [String; NUM_INSTRUMENTS] {
         self.control_deck.get_names()
+    }
+
+    pub fn get_envelope_names(&self) -> [String; NUM_ENVELOPES] {
+        self.control_deck.get_envelope_names()
     }
 
     pub fn get_bpm(&self) -> u16 {
@@ -226,7 +231,7 @@ impl Component for TrackerContainer {
             .direction(Direction::Vertical)
             .constraints(vec![
                 Constraint::Length(1),
-                Constraint::Length(7),
+                Constraint::Length(8),
                 Constraint::Fill(1),
             ])
             .split(area);

@@ -1,5 +1,6 @@
 mod command_palette;
 mod control_deck;
+mod envelope_editor;
 mod export_confirm_modal;
 mod file_browser;
 mod file_picker;
@@ -12,6 +13,7 @@ mod tuning_editor;
 
 pub use command_palette::CommandPalette;
 pub use control_deck::ControlDeck;
+pub use envelope_editor::EnvelopeEditor;
 pub use export_confirm_modal::ExportConfirmModal;
 pub use file_browser::FileBrowser;
 pub use instrument_editor::InstrumentEditor;

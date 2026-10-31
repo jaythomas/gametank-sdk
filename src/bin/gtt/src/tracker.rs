@@ -91,3 +91,62 @@ pub enum ChannelCmd {
     Volume(u8),
     Wavetable(u16),
 }
+
+/// One row of a pattern across all lanes (sequencer lane plus 7 channels).
+pub type BeatRow = [Beat; 8];
+
+fn row_at(pattern: &Pattern, row: usize) -> BeatRow {
+    std::array::from_fn(|lane| pattern[lane][row].clone())
+}
+
+/// Copies `count` rows starting at `start`. Returns `None` if the range is
+/// empty or extends past the pattern's `beats` length.
+pub fn yank_rows(pattern: &Pattern, beats: u8, start: u8, count: usize) -> Option<Vec<BeatRow>> {
+    let (start, beats) = (start as usize, beats as usize);
+    if count == 0 || start + count > beats {
+        return None;
+    }
+    Some((start..start + count).map(|r| row_at(pattern, r)).collect())
+}
+
+/// Removes `count` rows starting at `start`, shifting later rows up. Returns
+/// the removed rows and the new pattern length, which never drops below 1.
+pub fn delete_rows(
+    pattern: &mut Pattern,
+    beats: u8,
+    start: u8,
+    count: usize,
+) -> Option<(Vec<BeatRow>, u8)> {
+    let removed = yank_rows(pattern, beats, start, count)?;
+    let (start, beats_usize) = (start as usize, beats as usize);
+    for lane in pattern.iter_mut() {
+        let active = &mut lane[start..beats_usize];
+        active.rotate_left(count);
+        for beat in &mut active[beats_usize - start - count..] {
+            *beat = Beat::default();
+        }
+    }
+    let new_beats = (beats_usize - count).max(1) as u8;
+    Some((removed, new_beats))
+}
+
+/// Inserts as many rows of `clip` as fit before the pattern reaches
+/// `PATTERN_BEATS`, at row `at`, shifting existing rows down. Returns the new
+/// pattern length, or `None` if nothing can be inserted.
+pub fn paste_rows(pattern: &mut Pattern, beats: u8, at: u8, clip: &[BeatRow]) -> Option<u8> {
+    let (at, beats) = (at as usize, beats as usize);
+    let n = clip.len().min(PATTERN_BEATS.saturating_sub(beats));
+    if n == 0 || at > beats {
+        return None;
+    }
+    for (lane_idx, lane) in pattern.iter_mut().enumerate() {
+        for beat in &mut lane[beats..beats + n] {
+            *beat = Beat::default();
+        }
+        lane[at..beats + n].rotate_right(n);
+        for (i, row) in clip[..n].iter().enumerate() {
+            lane[at + i] = row[lane_idx].clone();
+        }
+    }
+    Some((beats + n) as u8)
+}

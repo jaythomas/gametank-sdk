@@ -3,8 +3,12 @@ use std::{path::{Path, PathBuf}, thread::sleep, time::Duration};
 use ratatui::{
     DefaultTerminal,
     crossterm::{
-        event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+        event::{
+            self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+            PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        },
         execute,
+        terminal::supports_keyboard_enhancement,
     },
     layout::Rect,
 };
@@ -20,15 +24,17 @@ use crate::{
     export,
     file::{NUM_INSTRUMENTS, TrackerFile},
     player::Player,
-    tracker::NUM_ENVELOPES,
+    tracker::{BeatRow, NUM_ENVELOPES},
 };
 
 pub struct App {
     input_path: PathBuf,
+    keyboard_enhanced: bool,
     terminal: DefaultTerminal,
     tracker_container: TrackerContainer,
     file_data: TrackerFile,
     config: GttConfig,
+    beat_clipboard: Vec<BeatRow>,
     command_palette: CommandPalette,
     instrument_editor: InstrumentEditor,
     envelope_editor: EnvelopeEditor,
@@ -53,6 +59,12 @@ impl App {
         file_data.tuning.key_assignments = config_to_tuning_keys(&config.bindings.key_assignments);
         let terminal = ratatui::init();
         execute!(std::io::stdout(), event::EnableMouseCapture)?;
+        let keyboard_enhanced = matches!(supports_keyboard_enhancement(), Ok(true))
+            && execute!(
+                std::io::stdout(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )
+            .is_ok();
         let tracker_container = TrackerContainer::init(&file_data);
         let player = Player::new(120);
         let mut file_browser = FileBrowser::new();
@@ -62,10 +74,12 @@ impl App {
         }
         Ok(Self {
             input_path,
+            keyboard_enhanced,
             terminal,
             tracker_container,
             file_data,
             config,
+            beat_clipboard: Vec::new(),
             command_palette: CommandPalette::init(),
             instrument_editor: InstrumentEditor::init(),
             envelope_editor: EnvelopeEditor::init(),
@@ -116,9 +130,21 @@ impl App {
         export::export_all(&self.file_data, bpm, fx_speed, &stem, export_dir)
     }
 
+    fn go_to_pattern(&mut self, offset: isize) {
+        let idx = self.tracker_container.pattern_idx() as isize;
+        let last = (self.file_data.patterns.len().max(1) - 1) as isize;
+        let target = idx.saturating_add(offset).clamp(0, last);
+        if target != idx {
+            self.tracker_container.set_pattern_idx(target as u8);
+        }
+    }
+
     pub fn run(mut self) -> std::io::Result<()> {
         let _ = poll_events();
         let result = self.event_loop();
+        if self.keyboard_enhanced {
+            execute!(std::io::stdout(), PopKeyboardEnhancementFlags).ok();
+        }
         execute!(std::io::stdout(), event::DisableMouseCapture).ok();
         result
     }
@@ -157,24 +183,28 @@ impl App {
             } else if self.command_palette.visible {
                 self.command_palette.update(events, &mut self.file_data)
             } else {
+                let mut hotkey_actions = Vec::new();
                 let mut tc_events = Vec::with_capacity(events.len());
                 for e in events {
-                    if matches!(
-                        &e,
-                        Event::Key(KeyEvent {
-                            code: KeyCode::Char(':'),
-                            kind: KeyEventKind::Press,
-                            modifiers: KeyModifiers::NONE,
-                            ..
-                        })
-                    ) {
+                    let Event::Key(key) = &e else {
+                        tc_events.push(e);
+                        continue;
+                    };
+                    if is_palette_key(key) && !self.tracker_container.is_editing_field() {
                         self.command_palette.visible = true;
+                    } else if let Some(action) = hotkey_action(key)
+                        && self.tracker_container.accepts_hotkeys()
+                    {
+                        hotkey_actions.push(action);
                     } else {
                         tc_events.push(e);
                     }
                 }
-                self.tracker_container
-                    .update(tc_events, &mut self.file_data)
+                let mut actions = self
+                    .tracker_container
+                    .update(tc_events, &mut self.file_data);
+                actions.extend(hotkey_actions);
+                actions
             };
 
             if self.handle_actions(actions)? {
@@ -255,6 +285,13 @@ impl App {
                         player.pause();
                     }
                 }
+                ComponentAction::DeleteBeats(count) => {
+                    if let Some(rows) =
+                        self.tracker_container.delete_beats(&mut self.file_data, count)
+                    {
+                        self.beat_clipboard = rows;
+                    }
+                }
                 ComponentAction::Export => {
                     let export_dir = self.export_dir();
                     if export_dir.exists() {
@@ -328,6 +365,13 @@ impl App {
                 ComponentAction::OpenTuningEditor => {
                     self.tuning_editor.open(&self.file_data.tuning);
                 }
+                ComponentAction::PasteAbove | ComponentAction::PasteBelow => {
+                    self.tracker_container.paste_beats(
+                        &mut self.file_data,
+                        &self.beat_clipboard,
+                        matches!(action, ComponentAction::PasteBelow),
+                    );
+                }
                 ComponentAction::PatternCopy => {
                     let idx = self.tracker_container.pattern_idx() as usize;
                     let copy = self.file_data.current_pattern(idx as u8).clone();
@@ -352,6 +396,7 @@ impl App {
                         self.tracker_container.set_pattern_idx(new_idx);
                     }
                 }
+                ComponentAction::PatternGoTo(offset) => self.go_to_pattern(offset),
                 ComponentAction::PatternNew => {
                     let idx = self.tracker_container.pattern_idx() as usize;
                     let insert_at = (idx + 1).min(self.file_data.patterns.len());
@@ -361,19 +406,8 @@ impl App {
                     self.file_data.pattern_beats.insert(insert_at, 64);
                     self.tracker_container.set_pattern_idx(insert_at as u8);
                 }
-                ComponentAction::PatternNext => {
-                    let idx = self.tracker_container.pattern_idx();
-                    let last = (self.file_data.patterns.len().max(1) - 1) as u8;
-                    if idx < last {
-                        self.tracker_container.set_pattern_idx(idx + 1);
-                    }
-                }
-                ComponentAction::PatternPrev => {
-                    let idx = self.tracker_container.pattern_idx();
-                    if idx > 0 {
-                        self.tracker_container.set_pattern_idx(idx - 1);
-                    }
-                }
+                ComponentAction::PatternNext => self.go_to_pattern(1),
+                ComponentAction::PatternPrev => self.go_to_pattern(-1),
                 ComponentAction::PatternZap => {
                     let idx = self.tracker_container.pattern_idx();
                     *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
@@ -452,10 +486,48 @@ impl App {
                         }
                     }
                 }
+                ComponentAction::YankBeats(count) => {
+                    if let Some(rows) = self.tracker_container.yank_beats(&self.file_data, count) {
+                        self.beat_clipboard = rows;
+                    }
+                }
             }
         }
         Ok(false)
     }
+}
+
+fn hotkey_action(key: &KeyEvent) -> Option<ComponentAction> {
+    if key.kind != KeyEventKind::Press
+        || key.modifiers.difference(KeyModifiers::SHIFT) != KeyModifiers::CONTROL
+    {
+        return None;
+    }
+    let c = match key.code {
+        KeyCode::Char(c) => c,
+        KeyCode::PageDown if key.modifiers == KeyModifiers::CONTROL => {
+            return Some(ComponentAction::PatternNext);
+        }
+        KeyCode::PageUp if key.modifiers == KeyModifiers::CONTROL => {
+            return Some(ComponentAction::PatternPrev);
+        }
+        _ => return None,
+    };
+    match c.to_ascii_lowercase() {
+        'c' | 'y' => Some(ComponentAction::YankBeats(1)),
+        'd' | 'x' => Some(ComponentAction::DeleteBeats(1)),
+        'm' => Some(ComponentAction::ToggleMuteChannel),
+        'p' if key.modifiers.contains(KeyModifiers::SHIFT) => Some(ComponentAction::PasteAbove),
+        'p' => Some(ComponentAction::PasteBelow),
+        's' => Some(ComponentAction::SoloChannel),
+        _ => None,
+    }
+}
+
+fn is_palette_key(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char(':')
+        && key.kind == KeyEventKind::Press
+        && (key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT)
 }
 
 fn poll_events() -> Vec<Event> {

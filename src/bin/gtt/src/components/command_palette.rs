@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::{
     action::ComponentAction, component::Component, file::TrackerFile, scheme::SCHEME,
-    tracker::PATTERN_TABLE_WIDTH,
+    tracker::{PATTERN_BEATS, PATTERN_TABLE_WIDTH},
 };
 
 pub struct CommandPalette {
@@ -28,24 +28,63 @@ impl CommandPalette {
     }
 
     fn execute(&mut self) -> Vec<ComponentAction> {
-        let mut actions = Vec::new();
-        match self.input.value::<String>().trim() {
-            "exp" | "export" => actions.push(ComponentAction::Export),
-            "instrument" => actions.push(ComponentAction::OpenInstrumentEditor(0)),
-            "envelope" => actions.push(ComponentAction::OpenEnvelopeEditor(0)),
-            "q" | "quit" => actions.push(ComponentAction::Quit),
-            "w" | "write" => actions.push(ComponentAction::SaveFile),
-            "wq" | "write-quit" => actions.push(ComponentAction::SaveAndQuit),
-            "mute" => actions.push(ComponentAction::MuteChannel),
-            "unmute" => actions.push(ComponentAction::UnmuteChannel),
-            "m" => actions.push(ComponentAction::ToggleMuteChannel),
-            "solo" | "s" => actions.push(ComponentAction::SoloChannel),
-            _ => {}
-        }
+        let actions = parse_command(&self.input.value::<String>());
         self.input.set_value("");
         self.visible = false;
         actions
     }
+}
+
+/// Parses an optional hexadecimal row count (`F` or `0xF`). Rejects zero and
+/// anything larger than a pattern.
+fn parse_row_count(arg: Option<&str>) -> Option<usize> {
+    let Some(arg) = arg else { return Some(1) };
+    let digits = arg.strip_prefix("0x").or(arg.strip_prefix("0X")).unwrap_or(arg);
+    let count = usize::from_str_radix(digits, 16).ok()?;
+    (1..=PATTERN_BEATS).contains(&count).then_some(count)
+}
+
+fn parse_pattern_offset(arg: &str) -> Option<isize> {
+    let (sign, unsigned) = match arg.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", arg),
+    };
+    let digits = unsigned.strip_prefix("0x").or(unsigned.strip_prefix("0X")).unwrap_or(unsigned);
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    isize::from_str_radix(&format!("{sign}{digits}"), 16).ok()
+}
+
+fn parse_command(input: &str) -> Vec<ComponentAction> {
+    let mut parts = input.split_whitespace();
+    let Some(name) = parts.next() else { return Vec::new() };
+    let arg = parts.next();
+    if parts.next().is_some() {
+        return Vec::new();
+    }
+    let action = match (name, arg) {
+        ("d" | "delete", _) => parse_row_count(arg).map(ComponentAction::DeleteBeats),
+        ("envelope", None) => Some(ComponentAction::OpenEnvelopeEditor(0)),
+        ("exp" | "export", None) => Some(ComponentAction::Export),
+        ("instrument", None) => Some(ComponentAction::OpenInstrumentEditor(0)),
+        ("m", None) => Some(ComponentAction::ToggleMuteChannel),
+        ("mute", None) => Some(ComponentAction::MuteChannel),
+        ("p" | "paste", None) => Some(ComponentAction::PasteBelow),
+        ("P" | "Paste", None) => Some(ComponentAction::PasteAbove),
+        ("play", None) => Some(ComponentAction::Play),
+        ("pn", None) => Some(ComponentAction::PatternNext),
+        ("pn", Some(arg)) => parse_pattern_offset(arg).map(ComponentAction::PatternGoTo),
+        ("pp", None) => Some(ComponentAction::PatternPrev),
+        ("q" | "quit", None) => Some(ComponentAction::Quit),
+        ("s" | "solo", None) => Some(ComponentAction::SoloChannel),
+        ("unmute", None) => Some(ComponentAction::UnmuteChannel),
+        ("w" | "write", None) => Some(ComponentAction::SaveFile),
+        ("wq" | "write-quit", None) => Some(ComponentAction::SaveAndQuit),
+        ("y" | "yank", _) => parse_row_count(arg).map(ComponentAction::YankBeats),
+        _ => None,
+    };
+    action.into_iter().collect()
 }
 
 impl Component for CommandPalette {

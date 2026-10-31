@@ -12,7 +12,9 @@ use crate::{
     components::{ControlDeck, pattern_editor::PatternEditor},
     file::{NUM_INSTRUMENTS, TrackerFile, TuningData},
     scheme::SCHEME,
-    tracker::{NUM_ENVELOPES, PATTERN_TABLE_WIDTH},
+    tracker::{
+        BeatRow, NUM_ENVELOPES, PATTERN_TABLE_WIDTH, delete_rows, paste_rows, yank_rows,
+    },
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -96,6 +98,49 @@ impl TrackerContainer {
 
     pub fn set_current_row(&mut self, row: u8) {
         self.pattern_editor.sel_y = row;
+    }
+
+    pub fn set_beats(&mut self, beats: u8) {
+        self.control_deck.set_beats(beats);
+    }
+
+    pub fn is_editing_field(&self) -> bool {
+        self.active_focus == AppFocus::ControlDeck && self.control_deck.editing
+    }
+
+    pub fn accepts_hotkeys(&self) -> bool {
+        !self.is_editing_field() && !self.pattern_editor.is_popup_open()
+    }
+
+    /// Cuts `count` rows from the selected row. Returns the removed rows.
+    pub fn delete_beats(&mut self, file: &mut TrackerFile, count: usize) -> Option<Vec<BeatRow>> {
+        let idx = self.pattern_idx();
+        let beats = file.beats_for(idx);
+        let (removed, new_beats) =
+            delete_rows(file.current_pattern_mut(idx), beats, self.current_row(), count)?;
+        file.set_beats_for(idx, new_beats);
+        self.set_beats(new_beats);
+        self.pattern_editor.end_cell_edit();
+        Some(removed)
+    }
+
+    /// Copies `count` rows from the selected row.
+    pub fn yank_beats(&self, file: &TrackerFile, count: usize) -> Option<Vec<BeatRow>> {
+        let idx = self.pattern_idx();
+        yank_rows(file.current_pattern(idx), file.beats_for(idx), self.current_row(), count)
+    }
+
+    /// Inserts `clip` above or below the selected row.
+    pub fn paste_beats(&mut self, file: &mut TrackerFile, clip: &[BeatRow], below: bool) {
+        let idx = self.pattern_idx();
+        let beats = file.beats_for(idx);
+        let row = self.current_row();
+        let at = if below { (row + 1).min(beats) } else { row };
+        if let Some(new_beats) = paste_rows(file.current_pattern_mut(idx), beats, at, clip) {
+            file.set_beats_for(idx, new_beats);
+            self.set_beats(new_beats);
+            self.pattern_editor.end_cell_edit();
+        }
     }
 
     pub fn apply_tuning(&mut self, tuning: &TuningData) {

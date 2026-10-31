@@ -242,6 +242,17 @@ impl PatternEditor {
         self.lanes[self.sel_x as usize].ch
     }
 
+    pub fn is_popup_open(&self) -> bool {
+        self.seq_choice.is_popup_active()
+    }
+
+    /// Ends any in-progress digit entry so the next digit starts a new value.
+    pub fn end_cell_edit(&mut self) {
+        self.vol_edit = None;
+        self.fx_edit = None;
+        self.seq_edit = None;
+    }
+
     pub fn is_channel_muted(&self, ch: usize) -> bool {
         self.channel_muted[ch]
     }

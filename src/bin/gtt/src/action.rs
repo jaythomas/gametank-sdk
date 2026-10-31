@@ -22,6 +22,7 @@ pub enum ComponentAction {
     CreateNewFile(PathBuf),
     PatternPrev,
     PatternNext,
+    PatternGoTo(isize),
     PatternNew,
     PatternCopy,
     PatternDelete,
@@ -31,4 +32,8 @@ pub enum ComponentAction {
     UnmuteChannel,
     ToggleMuteChannel,
     SoloChannel,
+    DeleteBeats(usize),
+    YankBeats(usize),
+    PasteBelow,
+    PasteAbove,
 }

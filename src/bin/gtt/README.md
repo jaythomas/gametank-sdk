@@ -59,7 +59,7 @@ They affect all channels unless a channel explicitly overrides the command.
 They are processed at the start of a beat before any voices.
 Use Enter/Up/Down/Esc on a SEQ cell to select a sequencer command.
 
-| ID | Label           | Parameters                                     | Description           |
+| id | label           | parameters                                     | description           |
 | -- | -----           | ----------                                     | -----------           |
 | 0  | (no effect)     |                                                |                       |
 | 1  | `[S]top`        | (none)                                         | Ends track playback   |
@@ -92,7 +92,7 @@ See the [Tuning editor](#tuning-editor) for how to update these mappings.
 
 **Fx** lets you apply effects per channel. Effects apply at the start of the beat before the note is processed.
 
-| ID | Label       | Parameters                                               | Description                                    |
+| id | label       | parameters                                               | description                                    |
 | -- | -----       | ----------                                               | -----------                                    |
 | 0  | (no effect) |                                                          |                                                |
 | 1  | Instrument  | x (0-7) = instrument index                               | Switch which instrument this channel is using. |
@@ -134,19 +134,23 @@ This provides quick keyboard-driven actions. All the commands available on the c
 When you start typing `:` your command input will start appearing at the very bottom of the screen.
 Press Enter to execute or Esc to cancel the command input.
 
-| command          | description                             |
-| -------          | -----------                             |
-| `:exp`/`:export` | export track                            |
-| `:instrument`    | open instrument editor                  |
-| `:envelope`      | open envelope editor                    |
-| `:m`             | toggle mute on the active voice channel |
-| `:mute`/`:unmute`| mute/unmute the active voice channel    |
-| `:q`/`:quit`     | quit the application                    |
-| `:s`/`:solo`     | solo the active voice channel (mutes all other channels, or unmutes all if already soloed) |
-| `:w`/`:write`    | save changes to file                    |
-
-TODO: lots more commands
-
+| command          | hotkey            | description                                                |
+| -------          | ------            | -----------                                                |
+| `:d`/`:delete N` | `Ctrl+d`/`Ctrl+x` | cut the selected beat to the tracker's clipboard, or N beats in hex, e.g. `:d f` |
+| `:envelope`      |                   | open envelope editor                                       |
+| `:exp`/`:export` |                   | export track                                               |
+| `:instrument`    |                   | open instrument editor                                     |
+| `:m`             | `Ctrl+m`          | toggle mute on the active voice channel                    |
+| `:mute`/`:unmute`|                   | mute/unmute the active voice channel                       |
+| `:p`/`:paste`    | `Ctrl+p`          | insert clipboard contents below the selected row           |
+| `:P`/`:Paste`    | `Ctrl+Shift+p`    | insert clipboard contents above the selected row           |
+| `:play`          | `Space`           | toggle playback from the selected row                      |
+| `:pn N`          | `Ctrl+PageDown`   | go to the next pattern, or N/-N patterns forward/back      |
+| `:pp`            | `Ctrl+PageUp`     | go to the previous pattern                                 |
+| `:q`/`:quit`     |                   | quit the application                                       |
+| `:s`/`:solo`     | `Ctrl+s`          | mutes all other channels, or unmutes all if already soloed |
+| `:w`/`:write`    |                   | save changes to file                                       |
+| `:y`/`:yank N`   | `Ctrl+c`/`Ctrl+y` | copy the selected beat, or N rows in hex                   |
 
 ## Instrument editor
 
@@ -159,7 +163,7 @@ For fine tuning the values, you also have the arrow keys.
 Each byte is an unsigned 8-bit PCM sample:
 
 | value         | description                  |
-| ------------- | ---------------------------- |
+| -----         | -----------                  |
 | `0x80`        | Zero / silence (DC midpoint) |
 | `0x81`-`0xFF` | Positive half-cycle          |
 | `0x00`-`0x7F` | Negative half-cycle          |
@@ -246,7 +250,7 @@ but arrays a pattern never uses are omitted entirely.
 **2. Patterns table** immediately follows the header at byte offset 6. It is a variable-sized array where each entry tells the location of the pattern data block for the given pattern index.
 
 | index                | type  | value                                                              |
-| -------------------- | ----  | -----                                                              |
+| -----                | ----  | -----                                                              |
 | 0                    | `u16` | Offset from the start of the file to pattern 0's data block        |
 | 1                    | `u16` | Offset from the start of the file to pattern 1's data block        |
 | ...                  | ...   | ...                                                                |
@@ -255,7 +259,7 @@ but arrays a pattern never uses are omitted entirely.
 **3. Frequency table** follows the patterns table at byte offset `6 + pattern_count * 2`. A track rarely uses more than a few dozen distinct pitches, so each one is stored once here and referenced by a one-byte index everywhere else.
 
 | index              | type  | value                                                    |
-| ------------------ | ----  | -----                                                    |
+| -----              | ----  | -----                                                    |
 | 0                  | `u16` | Reserved, always `0x0000`. An index of 0 means "no note" |
 | 1 ...              | `u16` | 16-bit phase increment for one distinct pitch            |
 

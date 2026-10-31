@@ -107,7 +107,6 @@ impl SclEntry {
 }
 
 pub struct TuningEditor {
-    pub visible: bool,
     base_col: BaseCol,
     base_editing: bool,
     base_focused: bool,
@@ -171,7 +170,6 @@ impl TuningEditor {
             scl_error: None,
             selected: 0,
             selected_col: EntryCol::Name,
-            visible: false,
         }
     }
 
@@ -187,7 +185,6 @@ impl TuningEditor {
         self.scl_error = None;
         self.selected = 0;
         self.selected_col = EntryCol::Name;
-        self.visible = true;
 
         let freq_str = format!("{}", self.base_freq.round().clamp(1.0, 1999.0) as u32);
         self.base_freq_input.set_value(freq_str.clone());
@@ -528,7 +525,8 @@ impl Component for TuningEditor {
                     kind: KeyEventKind::Press,
                     ..
                 }) if !self.editing && !self.base_editing && self.capturing_row.is_none() => {
-                    self.visible = false;
+                    actions.push(ComponentAction::CloseModal);
+                    break;
                 }
                 Event::Key(KeyEvent {
                     code,
@@ -693,7 +691,8 @@ impl Component for TuningEditor {
                         if self.base_editing {
                             self.base_freq_restore();
                         }
-                        self.visible = false;
+                        actions.push(ComponentAction::CloseModal);
+                        break;
                     } else if self.save_button.area.contains(pos) {
                         if self.editing {
                             self.confirm_editing();
@@ -701,8 +700,9 @@ impl Component for TuningEditor {
                         if self.base_editing {
                             self.base_freq_confirm();
                         }
+                        actions.push(ComponentAction::CloseModal);
                         actions.push(ComponentAction::TuningSaved(self.get_tuning_data()));
-                        self.visible = false;
+                        break;
                     } else if self.base_plus_btn.area.contains(pos) {
                         if self.editing {
                             self.confirm_editing();

@@ -26,7 +26,6 @@ enum Btn {
 }
 
 pub struct PatternDeleteConfirmModal {
-    pub visible: bool,
     focused: Btn,
     cancel_button: ButtonState,
     delete_button: ButtonState,
@@ -35,7 +34,6 @@ pub struct PatternDeleteConfirmModal {
 impl PatternDeleteConfirmModal {
     pub fn init() -> Self {
         Self {
-            visible: false,
             focused: Btn::Cancel,
             cancel_button: ButtonState::new(),
             delete_button: ButtonState::new(),
@@ -43,7 +41,6 @@ impl PatternDeleteConfirmModal {
     }
 
     pub fn open(&mut self) {
-        self.visible = true;
         self.focused = Btn::Cancel;
     }
 }
@@ -58,7 +55,8 @@ impl Component for PatternDeleteConfirmModal {
                     kind: KeyEventKind::Press,
                     ..
                 }) => {
-                    self.visible = false;
+                    actions.push(ComponentAction::CloseModal);
+                    break;
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Left,
@@ -80,11 +78,13 @@ impl Component for PatternDeleteConfirmModal {
                     ..
                 }) => match self.focused {
                     Btn::Cancel => {
-                        self.visible = false;
+                        actions.push(ComponentAction::CloseModal);
+                        break;
                     }
                     Btn::Delete => {
+                        actions.push(ComponentAction::CloseModal);
                         actions.push(ComponentAction::PatternDelete);
-                        self.visible = false;
+                        break;
                     }
                 },
                 Event::Mouse(MouseEvent {
@@ -98,10 +98,12 @@ impl Component for PatternDeleteConfirmModal {
                         y: *row,
                     };
                     if self.cancel_button.area.contains(pos) {
-                        self.visible = false;
+                        actions.push(ComponentAction::CloseModal);
+                        break;
                     } else if self.delete_button.area.contains(pos) {
+                        actions.push(ComponentAction::CloseModal);
                         actions.push(ComponentAction::PatternDelete);
-                        self.visible = false;
+                        break;
                     }
                 }
                 _ => {}

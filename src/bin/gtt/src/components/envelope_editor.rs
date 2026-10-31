@@ -94,7 +94,6 @@ struct BarLayout {
 }
 
 pub struct EnvelopeEditor {
-    pub visible: bool,
     pub envelope_idx: usize,
     envelope_name: String,
     cancel_button: ButtonState,
@@ -115,7 +114,6 @@ pub struct EnvelopeEditor {
 impl EnvelopeEditor {
     pub fn init() -> Self {
         Self {
-            visible: false,
             envelope_idx: 0,
             envelope_name: String::new(),
             cancel_button: ButtonState::new(),
@@ -141,7 +139,6 @@ impl EnvelopeEditor {
     }
 
     pub fn open(&mut self, idx: usize, name: &str, steps: &[u8]) {
-        self.visible = true;
         self.envelope_idx = idx;
         self.envelope_name = name.to_string();
         self.selected = 0;
@@ -353,7 +350,8 @@ impl Component for EnvelopeEditor {
                     kind: KeyEventKind::Press,
                     ..
                 }) => {
-                    self.visible = false;
+                    actions.push(ComponentAction::CloseModal);
+                    break;
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Left,
@@ -410,13 +408,15 @@ impl Component for EnvelopeEditor {
                             "bin",
                         );
                     } else if self.cancel_button.area.contains(pos) {
-                        self.visible = false;
+                        actions.push(ComponentAction::CloseModal);
+                        break;
                     } else if self.save_button.area.contains(pos) {
+                        actions.push(ComponentAction::CloseModal);
                         actions.push(ComponentAction::EnvelopeSaved(
                             self.envelope_idx,
                             self.get_steps(),
                         ));
-                        self.visible = false;
+                        break;
                     } else {
                         self.painting = true;
                         self.handle_bar_click(*column, *row);

@@ -10,14 +10,13 @@ use gte_w65c02s::W65C02S;
 use indexmap::IndexMap;
 
 use crate::file::NUM_INSTRUMENTS;
-use crate::tracker::{MAX_VOLUME, NUM_ENVELOPES, VOLUME_LEVELS, envelope_slot};
+use crate::tracker::{MAX_VOLUME, NUM_ENVELOPES, PATTERN_BEATS, VOLUME_LEVELS, envelope_slot};
 use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
 use crate::volume_scale::{SCALE_STRIDE, scale_table};
 
 const FIRMWARE: &[u8; 4096] =
     include_bytes!("../../../../rom-template/gametank/audiofw/wavetable.bin");
 
-const ROWS_PER_PATTERN: usize = 64;
 const AUDIO_CHANNELS: usize = 7;
 
 
@@ -181,7 +180,7 @@ impl PlayerInner {
             current_buffer: None,
             buffer_position: 0,
             patterns: vec![empty_pattern()],
-            pattern_beats_list: vec![ROWS_PER_PATTERN as u8],
+            pattern_beats_list: vec![PATTERN_BEATS as u8],
             current_pattern_idx: 0,
             flow_count: 0,
             tuning_notes: IndexMap::new(),
@@ -228,8 +227,8 @@ impl PlayerInner {
         self.pattern_beats_list
             .get(pattern_idx)
             .copied()
-            .unwrap_or(ROWS_PER_PATTERN as u8)
-            .clamp(1, ROWS_PER_PATTERN as u8) as usize
+            .unwrap_or(PATTERN_BEATS as u8)
+            .clamp(1, PATTERN_BEATS as u8) as usize
     }
 
     fn process_commands(&mut self) {

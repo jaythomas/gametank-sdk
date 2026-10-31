@@ -18,7 +18,6 @@ use crate::{action::ComponentAction, component::Component, file::TrackerFile, sc
 const CANCEL_BTN_W: u16 = 8;
 
 pub struct FileBrowser {
-    pub visible: bool,
     cancel_button: ButtonState,
     explorer_area: Rect,
     explorer_scroll_offset: usize,
@@ -28,7 +27,6 @@ pub struct FileBrowser {
 impl FileBrowser {
     pub fn new() -> Self {
         Self {
-            visible: false,
             cancel_button: ButtonState::new(),
             explorer_area: Rect::default(),
             explorer_scroll_offset: 0,
@@ -224,15 +222,13 @@ impl Component for FileBrowser {
 
             if close {
                 self.file_explorer = None;
-                self.visible = false;
+                actions.push(ComponentAction::CloseModal);
             }
 
             if let Some(path) = open_path {
                 actions.push(ComponentAction::OpenFile(path));
-                self.visible = false;
             } else if let Some(path) = create_new {
                 actions.push(ComponentAction::CreateNewFile(path));
-                self.visible = false;
             }
         }
 

@@ -28,7 +28,6 @@ enum Btn {
 }
 
 pub struct QuitConfirmModal {
-    pub visible: bool,
     focused: Btn,
     cancel_button: ButtonState,
     no_button: ButtonState,
@@ -38,7 +37,6 @@ pub struct QuitConfirmModal {
 impl QuitConfirmModal {
     pub fn init() -> Self {
         Self {
-            visible: false,
             focused: Btn::Cancel,
             cancel_button: ButtonState::new(),
             no_button: ButtonState::new(),
@@ -47,7 +45,6 @@ impl QuitConfirmModal {
     }
 
     pub fn open(&mut self) {
-        self.visible = true;
         self.focused = Btn::Cancel;
     }
 }
@@ -62,7 +59,8 @@ impl Component for QuitConfirmModal {
                     kind: KeyEventKind::Press,
                     ..
                 }) => {
-                    self.visible = false;
+                    actions.push(ComponentAction::CloseModal);
+                    break;
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Left,
@@ -92,15 +90,18 @@ impl Component for QuitConfirmModal {
                     ..
                 }) => match self.focused {
                     Btn::Cancel => {
-                        self.visible = false;
+                        actions.push(ComponentAction::CloseModal);
+                        break;
                     }
                     Btn::No => {
+                        actions.push(ComponentAction::CloseModal);
                         actions.push(ComponentAction::Quit);
-                        self.visible = false;
+                        break;
                     }
                     Btn::Yes => {
+                        actions.push(ComponentAction::CloseModal);
                         actions.push(ComponentAction::SaveAndQuit);
-                        self.visible = false;
+                        break;
                     }
                 },
                 Event::Key(KeyEvent {
@@ -108,16 +109,18 @@ impl Component for QuitConfirmModal {
                     kind: KeyEventKind::Press,
                     ..
                 }) => {
+                    actions.push(ComponentAction::CloseModal);
                     actions.push(ComponentAction::Quit);
-                    self.visible = false;
+                    break;
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('y') | KeyCode::Char('Y'),
                     kind: KeyEventKind::Press,
                     ..
                 }) => {
+                    actions.push(ComponentAction::CloseModal);
                     actions.push(ComponentAction::SaveAndQuit);
-                    self.visible = false;
+                    break;
                 }
                 Event::Mouse(MouseEvent {
                     kind: MouseEventKind::Down(MouseButton::Left),
@@ -130,13 +133,16 @@ impl Component for QuitConfirmModal {
                         y: *row,
                     };
                     if self.cancel_button.area.contains(pos) {
-                        self.visible = false;
+                        actions.push(ComponentAction::CloseModal);
+                        break;
                     } else if self.no_button.area.contains(pos) {
+                        actions.push(ComponentAction::CloseModal);
                         actions.push(ComponentAction::Quit);
-                        self.visible = false;
+                        break;
                     } else if self.yes_button.area.contains(pos) {
+                        actions.push(ComponentAction::CloseModal);
                         actions.push(ComponentAction::SaveAndQuit);
-                        self.visible = false;
+                        break;
                     }
                 }
                 _ => {}

@@ -34,7 +34,6 @@ struct BarLayout {
 }
 
 pub struct InstrumentEditor {
-    pub visible: bool,
     pub instrument_idx: usize,
     instrument_name: String,
     cancel_button: ButtonState,
@@ -51,7 +50,6 @@ pub struct InstrumentEditor {
 impl InstrumentEditor {
     pub fn init() -> Self {
         Self {
-            visible: false,
             instrument_idx: 0,
             instrument_name: String::new(),
             cancel_button: ButtonState::new(),
@@ -67,7 +65,6 @@ impl InstrumentEditor {
     }
 
     pub fn open(&mut self, idx: usize, name: &str, waveform: &[u8; NUM_BARS]) {
-        self.visible = true;
         self.selected = 0;
         self.instrument_idx = idx;
         self.instrument_name = name.to_string();
@@ -136,7 +133,8 @@ impl Component for InstrumentEditor {
                     kind: KeyEventKind::Press,
                     ..
                 }) => {
-                    self.visible = false;
+                    actions.push(ComponentAction::CloseModal);
+                    break;
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Left,
@@ -189,14 +187,16 @@ impl Component for InstrumentEditor {
                             "bin",
                         );
                     } else if self.cancel_button.area.contains(pos) {
-                        self.visible = false;
+                        actions.push(ComponentAction::CloseModal);
+                        break;
                     } else if self.save_button.area.contains(pos) {
                         let waveform = self.get_values();
+                        actions.push(ComponentAction::CloseModal);
                         actions.push(ComponentAction::InstrumentSaved(
                             self.instrument_idx,
                             waveform,
                         ));
-                        self.visible = false;
+                        break;
                     } else {
                         self.painting = true;
                         self.handle_bar_click(*column, *row);

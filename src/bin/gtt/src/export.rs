@@ -17,7 +17,7 @@ const TRACK_HEADER_SIZE: usize = 6;
 
 // Frequency table slot 0 is reserved: a note index of 0 means "no note here".
 const FREQ_INDEX_NONE: u8 = 0;
-const MAX_FREQ_ENTRIES: usize = 256;
+const MAX_FREQ_ENTRIES: usize = u8::MAX as usize;
 
 // Set in a pattern's channel mask when the pattern carries a sequence-command list.
 const PATTERN_HAS_SEQ: u8 = 0x80;
@@ -219,8 +219,8 @@ fn bake_pattern(
     // beats that actually have one are written out, so the sequencer scans a
     // handful of entries instead of reading three arrays every beat.
     let mut seq = Vec::new();
-    for beat in 0..beats {
-        let encoded = match &pattern[0][beat].sqc {
+    for (beat, cell) in pattern[0].iter().enumerate().take(beats) {
+        let encoded = match &cell.sqc {
             Some(SequencerCmd::Stop) => (SEQ_CMD_STOP, 0u8, 0u8),
             Some(SequencerCmd::Tempo(bpm)) => {
                 (SEQ_CMD_TEMPO, (*bpm & 0xFF) as u8, (*bpm >> 8) as u8)
@@ -337,6 +337,12 @@ fn serialize_pattern(pattern: &BakedPattern, freqs: &mut FreqTable) -> io::Resul
 
 fn build_track_bin(bpm: u16, fx_speed: u8, baked: &[BakedPattern]) -> io::Result<Vec<u8>> {
     let pattern_count = baked.len();
+    let pattern_count_byte = u8::try_from(pattern_count).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("track has {} patterns (maximum {})", pattern_count, u8::MAX),
+        )
+    })?;
 
     let mut freqs = FreqTable::new();
     let mut blocks = Vec::with_capacity(pattern_count);
@@ -347,14 +353,20 @@ fn build_track_bin(bpm: u16, fx_speed: u8, baked: &[BakedPattern]) -> io::Result
     let mut running = TRACK_HEADER_SIZE + pattern_count * 2 + freqs.entries.len() * 2;
     let mut pattern_offsets = Vec::with_capacity(pattern_count);
     for block in &blocks {
-        pattern_offsets.push(running as u16);
+        let offset = u16::try_from(running).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("track exceeds the {} bytes 16-bit pattern offsets can address", u16::MAX),
+            )
+        })?;
+        pattern_offsets.push(offset);
         running += block.len();
     }
 
     let mut out = Vec::with_capacity(running);
     out.extend_from_slice(&bpm.to_le_bytes());
     out.extend_from_slice(&(fx_speed as u16).to_le_bytes());
-    out.push(pattern_count as u8);
+    out.push(pattern_count_byte);
     out.push(freqs.entries.len() as u8);
     for off in &pattern_offsets {
         out.extend_from_slice(&off.to_le_bytes());
@@ -384,13 +396,7 @@ fn build_envelope_bin(steps: &[u8]) -> Vec<u8> {
     out
 }
 
-pub fn export_all(
-    file: &TrackerFile,
-    bpm: u16,
-    fx_speed: u8,
-    stem: &str,
-    export_dir: &Path,
-) -> io::Result<()> {
+pub fn export_all(file: &TrackerFile, stem: &str, export_dir: &Path) -> io::Result<()> {
     let baked: Vec<BakedPattern> = (0..file.patterns.len())
         .map(|i| {
             bake_pattern(
@@ -404,7 +410,7 @@ pub fn export_all(
 
     // Built before anything is written so a track that overflows the frequency
     // table doesn't leave a half-finished export behind.
-    let track_bin = build_track_bin(bpm, fx_speed, &baked)?;
+    let track_bin = build_track_bin(file.bpm, file.fx_speed, &baked)?;
 
     std::fs::create_dir_all(export_dir)?;
     let instruments_dir = export_dir.join("instruments");

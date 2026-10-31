@@ -20,9 +20,10 @@ use crate::{
     scheme::SCHEME,
     tracker::{
         Beat, ChannelCmd, FX_ID_ARPEGGIO, FX_ID_ENVELOPE, FX_ID_INSTRUMENT, FX_ID_PITCH_DOWN,
-        FX_ID_PITCH_UP, MAX_FX_ID, MAX_INSTRUMENT_INDEX, MAX_TEMPO, MAX_VOLUME, Pattern,
-        SequencerCmd,
+        FX_ID_PITCH_UP, MAX_FX_ID, MAX_FX_SPEED, MAX_INSTRUMENT_INDEX, MAX_TEMPO, MAX_VOLUME,
+        PATTERN_BEATS, Pattern, SequencerCmd,
     },
+    validation::ValidationError,
 };
 
 mod keybinds {
@@ -76,7 +77,7 @@ fn seq_cmd_args(cmd: &SequencerCmd) -> SeqArgs {
 
 fn seq_cmd_single_arg_max(cmd: &SequencerCmd) -> Option<u8> {
     match cmd {
-        SequencerCmd::FxSpeed(_) => Some(31),
+        SequencerCmd::FxSpeed(_) => Some(MAX_FX_SPEED),
         SequencerCmd::FlowCount(_) => Some(255),
         SequencerCmd::Stop
         | SequencerCmd::Tempo(_)
@@ -163,6 +164,34 @@ fn fx_digit_cap(fx_id: u8) -> u8 {
     if fx_id == FX_ID_ARPEGGIO { 3 } else { 2 }
 }
 
+fn hex_digit_key(event: &Event) -> Option<u8> {
+    match event {
+        Event::Key(KeyEvent {
+            code: KeyCode::Char(c),
+            kind: KeyEventKind::Press,
+            modifiers,
+            ..
+        }) if matches!(*modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+            c.to_digit(16).map(|d| d as u8)
+        }
+        _ => None,
+    }
+}
+
+fn shift_in_hex_digit<T: Copy + Into<u32> + TryFrom<u32>>(prev: T, digit: u8, max: T) -> T {
+    let value = (prev.into() * 16 + digit as u32).min(max.into());
+    T::try_from(value).unwrap_or(max)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum EditState {
+    Fx((u8, u8), u8),
+    Idle,
+    Seq((u8, u8), u8),
+    SeqChoice((u8, u8)),
+    Vol((u8, u8)),
+}
+
 #[derive(Default, Clone, Copy)]
 struct ViewLayout {
     outer: Rect,
@@ -180,12 +209,11 @@ pub struct PatternEditor {
     view_layout: ViewLayout,
     lanes: Vec<Lane>,
     transpose: i32,
-    vol_edit: Option<(u8, u8)>,
-    fx_edit: Option<((u8, u8), u8)>,
+    edit: EditState,
     seq_choice: ChoiceState<usize>,
-    seq_choice_cell: Option<(u8, u8)>,
-    seq_edit: Option<((u8, u8), u8)>,
     channel_muted: [bool; 7],
+    edited: bool,
+    validation_errors: Vec<ValidationError>,
 }
 
 impl PatternEditor {
@@ -194,7 +222,7 @@ impl PatternEditor {
             view_layout: ViewLayout::default(),
             playing: false,
             pattern_idx: 0,
-            beats: 64,
+            beats: PATTERN_BEATS as u8,
             lanes: vec![
                 Lane::beat(),
                 Lane::seq(),
@@ -223,13 +251,21 @@ impl PatternEditor {
             transpose: 0,
             sel_x: 2,
             sel_y: 0,
-            vol_edit: None,
-            fx_edit: None,
+            edit: EditState::Idle,
             seq_choice: ChoiceState::new(),
-            seq_choice_cell: None,
-            seq_edit: None,
             channel_muted: [false; 7],
+            edited: false,
+            validation_errors: Vec::new(),
         }
+    }
+
+    pub fn set_validation_errors(&mut self, errors: &[ValidationError]) {
+        self.validation_errors = errors.to_vec();
+    }
+
+    fn edit_pattern<'f>(&mut self, file: &'f mut TrackerFile) -> &'f mut Pattern {
+        self.edited = true;
+        file.current_pattern_mut(self.pattern_idx)
     }
 
     pub fn set_tuning(&mut self, _tuning: TuningData) {}
@@ -248,9 +284,9 @@ impl PatternEditor {
 
     /// Ends any in-progress digit entry so the next digit starts a new value.
     pub fn end_cell_edit(&mut self) {
-        self.vol_edit = None;
-        self.fx_edit = None;
-        self.seq_edit = None;
+        if !matches!(self.edit, EditState::SeqChoice(_)) {
+            self.edit = EditState::Idle;
+        }
     }
 
     pub fn is_channel_muted(&self, ch: usize) -> bool {
@@ -293,7 +329,12 @@ impl PatternEditor {
             LaneKind::Beat => CellDisplay::BeatNum(beat),
             LaneKind::Seq => {
                 let b = Self::get_channel_beat(lane.ch, beat, pattern);
-                CellDisplay::SeqCmds(b.sqc.clone())
+                let error = ValidationError {
+                    pattern: self.pattern_idx as usize,
+                    beat: row,
+                };
+                let invalid = self.validation_errors.binary_search(&error).is_ok();
+                CellDisplay::SeqCmds(b.sqc.clone(), invalid)
             }
             LaneKind::Note => {
                 let b = Self::get_channel_beat(lane.ch, beat, pattern);
@@ -330,7 +371,7 @@ pub enum CellStyle {
 
 pub enum CellDisplay {
     BeatNum(u8),
-    SeqCmds(Option<SequencerCmd>),
+    SeqCmds(Option<SequencerCmd>, bool),
     Note(NoteCell),
     Vol(Option<u8>),
     Fx(Option<(u8, u8, Option<u8>)>),
@@ -346,7 +387,7 @@ impl CellDisplay {
     fn text(&self) -> String {
         match self {
             CellDisplay::BeatNum(beat) => format!("   {:02X}", beat),
-            CellDisplay::SeqCmds(cmd) => match cmd {
+            CellDisplay::SeqCmds(cmd, _) => match cmd {
                 None => "-----".to_string(),
                 Some(cmd) => {
                     let (glyph, _) = seq_cmd_shorthand(cmd);
@@ -386,9 +427,10 @@ impl CellDisplay {
 
         let (fg, modifiers) = match self {
             CellDisplay::BeatNum(_) => (SCHEME.deepblue[2], Modifier::ITALIC),
-            CellDisplay::SeqCmds(cmd) => (
+            CellDisplay::SeqCmds(cmd, invalid) => (
                 match cmd {
                     None => SCHEME.gray[0],
+                    Some(_) if *invalid => SCHEME.magenta[3],
                     Some(cmd) => seq_cmd_shorthand(cmd).1,
                 },
                 Modifier::empty(),
@@ -462,6 +504,7 @@ impl Component for PatternEditor {
     fn update(&mut self, events: Vec<Event>, file: &mut TrackerFile) -> Vec<ComponentAction> {
         self.beats = file.beats_for(self.pattern_idx);
         self.sel_y = self.sel_y.min(self.beats.saturating_sub(1));
+        self.edited = false;
         if self.playing {
             return Vec::new();
         }
@@ -479,17 +522,11 @@ impl Component for PatternEditor {
             match code {
                 KeyCode::Up => {
                     self.sel_y = if self.sel_y == 0 { self.beats.saturating_sub(1) } else { self.sel_y - 1 };
-                    self.vol_edit = None;
-                    self.fx_edit = None;
-                    self.seq_edit = None;
-                    self.seq_choice_cell = None;
+                    self.edit = EditState::Idle;
                 }
                 KeyCode::Down => {
                     self.sel_y = if self.sel_y + 1 >= self.beats { 0 } else { self.sel_y + 1 };
-                    self.vol_edit = None;
-                    self.fx_edit = None;
-                    self.seq_edit = None;
-                    self.seq_choice_cell = None;
+                    self.edit = EditState::Idle;
                 }
                 KeyCode::Left => {
                     self.sel_x = if self.sel_x == 0 {
@@ -497,33 +534,21 @@ impl Component for PatternEditor {
                     } else {
                         self.sel_x - 1
                     };
-                    self.vol_edit = None;
-                    self.fx_edit = None;
-                    self.seq_edit = None;
-                    self.seq_choice_cell = None;
+                    self.edit = EditState::Idle;
                 }
                 KeyCode::Right => {
                     self.sel_x = (self.sel_x + 1) % self.lanes.len() as u8;
-                    self.vol_edit = None;
-                    self.fx_edit = None;
-                    self.seq_edit = None;
-                    self.seq_choice_cell = None;
+                    self.edit = EditState::Idle;
                 }
                 KeyCode::PageUp => {
                     let step = (self.view_layout.page_h / 2).max(1) as u8;
                     self.sel_y = self.sel_y.saturating_sub(step);
-                    self.vol_edit = None;
-                    self.fx_edit = None;
-                    self.seq_edit = None;
-                    self.seq_choice_cell = None;
+                    self.edit = EditState::Idle;
                 }
                 KeyCode::PageDown => {
                     let step = (self.view_layout.page_h / 2).max(1) as u8;
                     self.sel_y = (self.sel_y + step).min(self.beats.saturating_sub(1));
-                    self.vol_edit = None;
-                    self.fx_edit = None;
-                    self.seq_edit = None;
-                    self.seq_choice_cell = None;
+                    self.edit = EditState::Idle;
                 }
                 _ => {}
             }
@@ -544,7 +569,7 @@ impl Component for PatternEditor {
                         ..
                     }) if keybinds::NOTE_OFF.contains(code) => {
                         let row = self.sel_y as usize;
-                        let pattern = file.current_pattern_mut(self.pattern_idx);
+                        let pattern = self.edit_pattern(file);
                         let beat = &mut pattern[channel + 1][row];
                         beat.cmd_list
                             .retain(|c| !matches!(c, ChannelCmd::Note(_) | ChannelCmd::NoteOff));
@@ -557,7 +582,7 @@ impl Component for PatternEditor {
                         ..
                     }) if keybinds::CLEAR.contains(code) => {
                         let row = self.sel_y as usize;
-                        let pattern = file.current_pattern_mut(self.pattern_idx);
+                        let pattern = self.edit_pattern(file);
                         let beat = &mut pattern[channel + 1][row];
                         beat.cmd_list
                             .retain(|c| !matches!(c, ChannelCmd::Note(_) | ChannelCmd::NoteOff));
@@ -582,7 +607,7 @@ impl Component for PatternEditor {
                                 if shifted >= 0 && shifted < note_keys.len() as i32 {
                                     let transposed = note_keys[shifted as usize].clone();
                                     let row = self.sel_y as usize;
-                                    let pattern = file.current_pattern_mut(self.pattern_idx);
+                                    let pattern = self.edit_pattern(file);
                                     let beat = &mut pattern[channel + 1][row];
                                     beat.cmd_list.retain(|c| {
                                         !matches!(c, ChannelCmd::Note(_) | ChannelCmd::NoteOff)
@@ -602,41 +627,34 @@ impl Component for PatternEditor {
             let cell = (self.sel_x, self.sel_y);
             let row = self.sel_y as usize;
             for event in &events {
-                match event {
-                    Event::Key(KeyEvent {
-                        code: KeyCode::Char(c),
-                        kind: KeyEventKind::Press,
-                        modifiers,
-                        ..
-                    }) if matches!(*modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
-                        && c.is_ascii_hexdigit() =>
-                    {
-                        let digit = c.to_digit(16).unwrap() as u8;
-                        // A second digit typed into the same cell shifts the
-                        // first one up, so "1" then "2" reads as 12 rather
-                        // than restarting the entry.
-                        let prev = if self.vol_edit == Some(cell) {
-                            let pattern = file.current_pattern(self.pattern_idx);
-                            pattern[channel + 1][row]
-                                .cmd_list
-                                .iter()
-                                .find_map(|c| match c {
-                                    ChannelCmd::Volume(v) => Some(*v),
-                                    _ => None,
-                                })
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        let value = ((prev % 16) * 16 + digit).min(MAX_VOLUME);
-                        self.vol_edit = Some(cell);
+                if let Some(digit) = hex_digit_key(event) {
+                    // A second digit typed into the same cell shifts the
+                    // first one up, so "1" then "2" reads as 12 rather
+                    // than restarting the entry.
+                    let prev = if self.edit == EditState::Vol(cell) {
+                        let pattern = file.current_pattern(self.pattern_idx);
+                        pattern[channel + 1][row]
+                            .cmd_list
+                            .iter()
+                            .find_map(|c| match c {
+                                ChannelCmd::Volume(v) => Some(*v),
+                                _ => None,
+                            })
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let value = shift_in_hex_digit(prev % 16, digit, MAX_VOLUME);
+                    self.edit = EditState::Vol(cell);
 
-                        let pattern = file.current_pattern_mut(self.pattern_idx);
-                        let beat = &mut pattern[channel + 1][row];
-                        beat.cmd_list
-                            .retain(|c| !matches!(c, ChannelCmd::Volume(_)));
-                        beat.cmd_list.push(ChannelCmd::Volume(value));
-                    }
+                    let pattern = self.edit_pattern(file);
+                    let beat = &mut pattern[channel + 1][row];
+                    beat.cmd_list
+                        .retain(|c| !matches!(c, ChannelCmd::Volume(_)));
+                    beat.cmd_list.push(ChannelCmd::Volume(value));
+                    continue;
+                }
+                match event {
                     Event::Key(KeyEvent {
                         code,
                         kind: KeyEventKind::Press,
@@ -646,7 +664,7 @@ impl Component for PatternEditor {
                         && (*code == keybinds::VOL_INCREMENT
                             || *code == keybinds::VOL_DECREMENT) =>
                     {
-                        self.vol_edit = None;
+                        self.edit = EditState::Idle;
                         let pattern = file.current_pattern(self.pattern_idx);
                         let current =
                             pattern[channel + 1][row]
@@ -671,7 +689,7 @@ impl Component for PatternEditor {
                         };
 
                         if let Some(value) = next_value {
-                            let pattern = file.current_pattern_mut(self.pattern_idx);
+                            let pattern = self.edit_pattern(file);
                             let beat = &mut pattern[channel + 1][row];
                             beat.cmd_list
                                 .retain(|c| !matches!(c, ChannelCmd::Volume(_)));
@@ -683,8 +701,8 @@ impl Component for PatternEditor {
                         kind: KeyEventKind::Press,
                         ..
                     }) if keybinds::CLEAR.contains(code) => {
-                        self.vol_edit = None;
-                        let pattern = file.current_pattern_mut(self.pattern_idx);
+                        self.edit = EditState::Idle;
+                        let pattern = self.edit_pattern(file);
                         let beat = &mut pattern[channel + 1][row];
                         beat.cmd_list
                             .retain(|c| !matches!(c, ChannelCmd::Volume(_)));
@@ -698,51 +716,44 @@ impl Component for PatternEditor {
             let cell = (self.sel_x, self.sel_y);
             let row = self.sel_y as usize;
             for event in &events {
-                match event {
-                    Event::Key(KeyEvent {
-                        code: KeyCode::Char(c),
-                        kind: KeyEventKind::Press,
-                        modifiers,
-                        ..
-                    }) if matches!(*modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
-                        && c.is_ascii_hexdigit() =>
-                    {
-                        let digit = c.to_digit(16).unwrap() as u8;
-                        let (mut fx_id, mut fx_x, mut fx_y, digits_typed) = match self.fx_edit {
-                            Some((c, n)) if c == cell => {
-                                let pattern = file.current_pattern(self.pattern_idx);
-                                let (id, x, y) =
-                                    pattern[channel + 1][row].fx().unwrap_or((0, 0, None));
-                                (id, x, y, n)
-                            }
-                            _ => (0, 0, None, 0),
-                        };
-
-                        if digits_typed == 0 {
-                            if digit > MAX_FX_ID {
-                                continue;
-                            }
-                            fx_id = digit;
-                            fx_x = 0;
-                            fx_y = None;
-                        } else if fx_id == FX_ID_INSTRUMENT {
-                            fx_x = digit.min(fx_x_max(fx_id));
-                        } else if fx_id == FX_ID_ARPEGGIO {
-                            if digits_typed == 1 {
-                                fx_x = digit.min(fx_x_max(fx_id));
-                            } else {
-                                fx_y = Some(digit);
-                            }
-                        } else {
-                            fx_x = ((fx_x % 16) * 16 + digit).min(fx_x_max(fx_id));
+                if let Some(digit) = hex_digit_key(event) {
+                    let (mut fx_id, mut fx_x, mut fx_y, digits_typed) = match self.edit {
+                        EditState::Fx(c, n) if c == cell => {
+                            let pattern = file.current_pattern(self.pattern_idx);
+                            let (id, x, y) =
+                                pattern[channel + 1][row].fx().unwrap_or((0, 0, None));
+                            (id, x, y, n)
                         }
-                        let digits_typed = (digits_typed + 1).min(fx_digit_cap(fx_id));
-                        self.fx_edit = Some((cell, digits_typed));
+                        _ => (0, 0, None, 0),
+                    };
 
-                        let pattern = file.current_pattern_mut(self.pattern_idx);
-                        let beat = &mut pattern[channel + 1][row];
-                        set_beat_fx(beat, fx_id, fx_x, fx_y);
+                    if digits_typed == 0 {
+                        if digit > MAX_FX_ID {
+                            continue;
+                        }
+                        fx_id = digit;
+                        fx_x = 0;
+                        fx_y = None;
+                    } else if fx_id == FX_ID_INSTRUMENT {
+                        fx_x = digit.min(fx_x_max(fx_id));
+                    } else if fx_id == FX_ID_ARPEGGIO {
+                        if digits_typed == 1 {
+                            fx_x = digit.min(fx_x_max(fx_id));
+                        } else {
+                            fx_y = Some(digit);
+                        }
+                    } else {
+                        fx_x = shift_in_hex_digit(fx_x % 16, digit, fx_x_max(fx_id));
                     }
+                    let digits_typed = (digits_typed + 1).min(fx_digit_cap(fx_id));
+                    self.edit = EditState::Fx(cell, digits_typed);
+
+                    let pattern = self.edit_pattern(file);
+                    let beat = &mut pattern[channel + 1][row];
+                    set_beat_fx(beat, fx_id, fx_x, fx_y);
+                    continue;
+                }
+                match event {
                     Event::Key(KeyEvent {
                         code,
                         kind: KeyEventKind::Press,
@@ -752,22 +763,22 @@ impl Component for PatternEditor {
                             .fx()
                             .map(|(id, _, _)| id)
                             .unwrap_or(0);
-                        let digits_typed = match self.fx_edit {
-                            Some((c, n)) if c == cell => n,
+                        let digits_typed = match self.edit {
+                            EditState::Fx(c, n) if c == cell => n,
                             _ if existing_id == 0 => 0,
                             _ => fx_digit_cap(existing_id),
                         };
 
                         if digits_typed == 0 {
-                            self.fx_edit = None;
+                            self.edit = EditState::Idle;
                         } else {
                             let remaining = digits_typed - 1;
 
                             let (fx_id, fx_x, fx_y) = if remaining == 0 {
-                                self.fx_edit = None;
+                                self.edit = EditState::Idle;
                                 (0, 0, None)
                             } else {
-                                self.fx_edit = Some((cell, remaining));
+                                self.edit = EditState::Fx(cell, remaining);
                                 let pattern = file.current_pattern(self.pattern_idx);
                                 let (id, x, _y) =
                                     pattern[channel + 1][row].fx().unwrap_or((0, 0, None));
@@ -777,7 +788,7 @@ impl Component for PatternEditor {
                                 }
                             };
 
-                            let pattern = file.current_pattern_mut(self.pattern_idx);
+                            let pattern = self.edit_pattern(file);
                             let beat = &mut pattern[channel + 1][row];
                             set_beat_fx(beat, fx_id, fx_x, fx_y);
                         }
@@ -792,7 +803,7 @@ impl Component for PatternEditor {
             let row = self.sel_y as usize;
             let current_sqc = file.current_pattern(self.pattern_idx)[0][row].sqc.clone();
 
-            if self.seq_choice.is_popup_active() && self.seq_choice_cell == Some(cell) {
+            if self.seq_choice.is_popup_active() && self.edit == EditState::SeqChoice(cell) {
                 for event in &events {
                     let Event::Key(KeyEvent {
                         code,
@@ -816,11 +827,10 @@ impl Component for PatternEditor {
                         }
                         KeyCode::Enter | KeyCode::Esc => {
                             self.seq_choice.set_popup_active(false);
-                            self.seq_choice_cell = None;
+                            self.edit = EditState::Idle;
                             let idx = self.seq_choice.value();
                             let new_sqc = seq_choice_default(idx);
-                            self.seq_edit = None;
-                            let pattern = file.current_pattern_mut(self.pattern_idx);
+                            let pattern = self.edit_pattern(file);
                             pattern[0][row].sqc = new_sqc;
                         }
                         _ => {}
@@ -828,6 +838,49 @@ impl Component for PatternEditor {
                 }
             } else {
                 for event in &events {
+                    if let Some(digit) = hex_digit_key(event) {
+                        let digits_typed = match self.edit {
+                            EditState::Seq(c, n) if c == cell => n,
+                            _ => 0,
+                        };
+
+                        let max_pattern = (file.patterns.len().max(1) - 1) as u8;
+
+                        let new_sqc = match &current_sqc {
+                            Some(SequencerCmd::Tempo(v)) => {
+                                let prev = if digits_typed == 0 { 0 } else { *v };
+                                let value = shift_in_hex_digit(prev, digit, MAX_TEMPO);
+                                self.edit = EditState::Seq(cell, (digits_typed + 1).min(4));
+                                Some(SequencerCmd::Tempo(value))
+                            }
+                            Some(cmd @ (SequencerCmd::FxSpeed(v)
+                            | SequencerCmd::FlowCount(v))) => {
+                                let max = seq_cmd_single_arg_max(cmd).unwrap();
+                                let prev = if digits_typed == 0 { 0 } else { *v };
+                                let value = shift_in_hex_digit(prev, digit, max);
+                                self.edit = EditState::Seq(cell, (digits_typed + 1).min(2));
+                                Some(seq_cmd_set_arg0(cmd, value))
+                            }
+                            Some(cmd @ (SequencerCmd::CountJump(p, b) | SequencerCmd::Jump(p, b))) => {
+                                let (mut p, mut b) = (*p, *b);
+                                if digits_typed < 2 {
+                                    let prev = if digits_typed == 0 { 0 } else { p };
+                                    p = shift_in_hex_digit(prev, digit, max_pattern);
+                                    b = 0;
+                                } else {
+                                    let max_beat = file.beats_for(p).max(1) - 1;
+                                    let prev = if digits_typed == 2 { 0 } else { b };
+                                    b = shift_in_hex_digit(prev, digit, max_beat);
+                                }
+                                self.edit = EditState::Seq(cell, (digits_typed + 1).min(4));
+                                Some(seq_cmd_set_arg2(cmd, p, b))
+                            }
+                            other => other.clone(),
+                        };
+                        let pattern = self.edit_pattern(file);
+                        pattern[0][row].sqc = new_sqc;
+                        continue;
+                    }
                     match event {
                         Event::Key(KeyEvent {
                             code: KeyCode::Enter,
@@ -837,60 +890,7 @@ impl Component for PatternEditor {
                             let idx = seq_choice_index(current_sqc.as_ref());
                             self.seq_choice.set_value(idx);
                             self.seq_choice.set_popup_active(true);
-                            self.seq_choice_cell = Some(cell);
-                        }
-                        Event::Key(KeyEvent {
-                            code: KeyCode::Char(c),
-                            kind: KeyEventKind::Press,
-                            modifiers,
-                            ..
-                        }) if matches!(*modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
-                            && c.is_ascii_hexdigit() =>
-                        {
-                            let digit = c.to_digit(16).unwrap() as u8;
-                            let digits_typed = match self.seq_edit {
-                                Some((c, n)) if c == cell => n,
-                                _ => 0,
-                            };
-
-                            let max_pattern = (file.patterns.len().max(1) - 1) as u8;
-
-                            let new_sqc = match &current_sqc {
-                                Some(SequencerCmd::Tempo(v)) => {
-                                    let prev = if digits_typed == 0 { 0 } else { *v };
-                                    let value =
-                                        (prev as u32 * 16 + digit as u32).min(MAX_TEMPO as u32) as u16;
-                                    self.seq_edit = Some((cell, (digits_typed + 1).min(4)));
-                                    Some(SequencerCmd::Tempo(value))
-                                }
-                                Some(cmd @ (SequencerCmd::FxSpeed(v)
-                                | SequencerCmd::FlowCount(v))) => {
-                                    let max = seq_cmd_single_arg_max(cmd).unwrap();
-                                    let prev = if digits_typed == 0 { 0 } else { *v };
-                                    let value = (prev as u32 * 16 + digit as u32).min(max as u32) as u8;
-                                    self.seq_edit = Some((cell, (digits_typed + 1).min(2)));
-                                    Some(seq_cmd_set_arg0(cmd, value))
-                                }
-                                Some(cmd @ (SequencerCmd::CountJump(p, b) | SequencerCmd::Jump(p, b))) => {
-                                    let (mut p, mut b) = (*p, *b);
-                                    if digits_typed < 2 {
-                                        let prev = if digits_typed == 0 { 0 } else { p };
-                                        p = (prev as u32 * 16 + digit as u32).min(max_pattern as u32)
-                                            as u8;
-                                        b = 0;
-                                    } else {
-                                        let max_beat = file.beats_for(p).max(1) - 1;
-                                        let prev = if digits_typed == 2 { 0 } else { b };
-                                        b = (prev as u32 * 16 + digit as u32).min(max_beat as u32)
-                                            as u8;
-                                    }
-                                    self.seq_edit = Some((cell, (digits_typed + 1).min(4)));
-                                    Some(seq_cmd_set_arg2(cmd, p, b))
-                                }
-                                other => other.clone(),
-                            };
-                            let pattern = file.current_pattern_mut(self.pattern_idx);
-                            pattern[0][row].sqc = new_sqc;
+                            self.edit = EditState::SeqChoice(cell);
                         }
                         Event::Key(KeyEvent {
                             code,
@@ -901,7 +901,7 @@ impl Component for PatternEditor {
                             && (*code == keybinds::VOL_INCREMENT
                                 || *code == keybinds::VOL_DECREMENT) =>
                         {
-                            self.seq_edit = None;
+                            self.edit = EditState::Idle;
                             let inc = *code == keybinds::VOL_INCREMENT;
 
                             let new_sqc = match &current_sqc {
@@ -934,7 +934,7 @@ impl Component for PatternEditor {
                                 }
                                 other => other.clone(),
                             };
-                            let pattern = file.current_pattern_mut(self.pattern_idx);
+                            let pattern = self.edit_pattern(file);
                             pattern[0][row].sqc = new_sqc;
                         }
                         Event::Key(KeyEvent {
@@ -942,8 +942,8 @@ impl Component for PatternEditor {
                             kind: KeyEventKind::Press,
                             ..
                         }) if keybinds::CLEAR.contains(code) => {
-                            self.seq_edit = None;
-                            let pattern = file.current_pattern_mut(self.pattern_idx);
+                            self.edit = EditState::Idle;
+                            let pattern = self.edit_pattern(file);
                             pattern[0][row].sqc = None;
                         }
                         _ => {}
@@ -952,7 +952,11 @@ impl Component for PatternEditor {
             }
         }
 
-        Vec::new()
+        if self.edited {
+            vec![ComponentAction::PatternEdited]
+        } else {
+            Vec::new()
+        }
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, file: &TrackerFile) {
@@ -1089,7 +1093,7 @@ impl PatternEditor {
         if !self.seq_choice.is_popup_active() {
             return;
         }
-        let Some((sel_x, sel_y)) = self.seq_choice_cell else {
+        let EditState::SeqChoice((sel_x, sel_y)) = self.edit else {
             return;
         };
         let header_bottom = self.view_layout.table.y + 1;
@@ -1225,10 +1229,7 @@ impl PatternEditor {
                         self.sel_y + 1
                     };
                 }
-                self.vol_edit = None;
-                self.fx_edit = None;
-                self.seq_edit = None;
-                self.seq_choice_cell = None;
+                self.edit = EditState::Idle;
                 true
             }
             _ => false,

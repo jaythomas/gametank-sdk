@@ -19,7 +19,8 @@ use crate::{
     component::Component,
     file::{NUM_INSTRUMENTS, TrackerFile},
     scheme::SCHEME,
-    tracker::{MAX_TEMPO, NUM_ENVELOPES, PATTERN_BEATS, PATTERN_TABLE_WIDTH},
+    tracker::{MAX_FX_SPEED, MAX_TEMPO, NUM_ENVELOPES, PATTERN_BEATS, PATTERN_TABLE_WIDTH},
+    validation::ValidationError,
 };
 
 const BTN_W: u16 = 3;
@@ -90,19 +91,26 @@ fn render_named_slots(
 struct NamedSlotEntry {
     open_button: ButtonState,
     name_input: TextInputState,
-    name_snapshot: String,
 }
 
 impl NamedSlotEntry {
-    fn new(name: &str) -> Self {
-        let mut name_input = TextInputState::new();
-        name_input.set_value(name);
+    fn new() -> Self {
         Self {
             open_button: ButtonState::new(),
-            name_input,
-            name_snapshot: name.to_string(),
+            name_input: TextInputState::new(),
         }
     }
+}
+
+fn show_value(input: &mut TextInputState, value: &str) {
+    if input.value::<String>() != value {
+        input.set_value(value);
+    }
+}
+
+fn parse_setting(row: Row, raw: &str) -> u16 {
+    let (min, max) = row.range();
+    u16::from_str_radix(raw, 16).map_or(min, |v| v.clamp(min, max))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -176,8 +184,8 @@ impl Row {
     fn range(self) -> (u16, u16) {
         match self {
             Row::Bpm => (1, MAX_TEMPO),
-            Row::FxSpeed => (1, 31),
-            Row::Beats => (0, 255),
+            Row::FxSpeed => (1, MAX_FX_SPEED as u16),
+            Row::Beats => (1, PATTERN_BEATS as u16),
             Row::Trans
             | Row::Instrument(_)
             | Row::Envelope(_)
@@ -271,11 +279,9 @@ pub struct ControlDeck {
     bpm_input: TextInputState,
     bpm_minus: ButtonState,
     bpm_plus: ButtonState,
-    bpm_snapshot: String,
     fx_speed_input: TextInputState,
     fx_speed_minus: ButtonState,
     fx_speed_plus: ButtonState,
-    fx_speed_snapshot: String,
     pub editing: bool,
     instruments: [NamedSlotEntry; NUM_INSTRUMENTS],
     envelopes: [NamedSlotEntry; NUM_ENVELOPES],
@@ -283,7 +289,6 @@ pub struct ControlDeck {
     rows_input: TextInputState,
     rows_minus: ButtonState,
     rows_plus: ButtonState,
-    rows_snapshot: String,
     save_feedback_until: Option<Instant>,
     export_feedback_until: Option<Instant>,
     selected_col: Col,
@@ -303,32 +308,25 @@ pub struct ControlDeck {
     pattern_zap_btn: ButtonState,
     pattern_idx: u8,
     pattern_count: usize,
+    pattern_edited: bool,
+    validation_errors: Vec<ValidationError>,
 }
 
 impl ControlDeck {
     pub fn init() -> Self {
-        let mut bpm_input = TextInputState::new();
-        bpm_input.set_value("78");
-        let mut fx_speed_input = TextInputState::new();
-        fx_speed_input.set_value("6");
-        let mut rows_input = TextInputState::new();
-        rows_input.set_value("40");
         let mut trans_input = TextInputState::new();
         trans_input.set_value("0");
         Self {
             selected_row: Row::Bpm,
             selected_col: Col::Input,
             editing: false,
-            bpm_input,
-            bpm_snapshot: "78".to_string(),
+            bpm_input: TextInputState::new(),
             bpm_plus: ButtonState::new(),
             bpm_minus: ButtonState::new(),
-            fx_speed_input,
-            fx_speed_snapshot: "6".to_string(),
+            fx_speed_input: TextInputState::new(),
             fx_speed_plus: ButtonState::new(),
             fx_speed_minus: ButtonState::new(),
-            rows_input,
-            rows_snapshot: "40".to_string(),
+            rows_input: TextInputState::new(),
             rows_plus: ButtonState::new(),
             rows_minus: ButtonState::new(),
             trans_input,
@@ -338,10 +336,8 @@ impl ControlDeck {
             trans_assigned_indices: Vec::new(),
             trans_note_count: 0,
             trans_scale_size: 0,
-            instruments: std::array::from_fn(|i| {
-                NamedSlotEntry::new(&format!("instrument_{}", i))
-            }),
-            envelopes: std::array::from_fn(|i| NamedSlotEntry::new(&format!("envelope_{}", i))),
+            instruments: std::array::from_fn(|_| NamedSlotEntry::new()),
+            envelopes: std::array::from_fn(|_| NamedSlotEntry::new()),
             playing: false,
             action_tuning_btn: ButtonState::new(),
             action_new_open_btn: ButtonState::new(),
@@ -357,36 +353,16 @@ impl ControlDeck {
             pattern_zap_btn: ButtonState::new(),
             pattern_idx: 0,
             pattern_count: 1,
+            pattern_edited: false,
             save_feedback_until: None,
             export_feedback_until: None,
+            validation_errors: Vec::new(),
         }
     }
 
-    pub fn get_names(&self) -> [String; NUM_INSTRUMENTS] {
-        std::array::from_fn(|i| self.instruments[i].name_input.value::<String>())
-    }
-
-    pub fn set_names(&mut self, names: &[String; NUM_INSTRUMENTS]) {
-        for (i, instrument) in self.instruments.iter_mut().enumerate() {
-            instrument.name_input.set_value(names[i].clone());
-            instrument.name_snapshot = names[i].clone();
-        }
-    }
-
-    pub fn get_envelope_names(&self) -> [String; NUM_ENVELOPES] {
-        std::array::from_fn(|i| self.envelopes[i].name_input.value::<String>())
-    }
-
-    pub fn set_envelope_names(&mut self, names: &[String; NUM_ENVELOPES]) {
-        for (i, envelope) in self.envelopes.iter_mut().enumerate() {
-            envelope.name_input.set_value(names[i].clone());
-            envelope.name_snapshot = names[i].clone();
-        }
-    }
-
-    pub fn blur_all(&mut self) {
+    pub fn blur_all(&mut self, file: &mut TrackerFile) -> Vec<ComponentAction> {
         if self.editing {
-            self.confirm_editing();
+            self.confirm_editing(file);
         }
         self.bpm_input.focus.set(false);
         self.bpm_plus.focus.set(false);
@@ -416,67 +392,53 @@ impl ControlDeck {
         self.pattern_copy_btn.focus.set(false);
         self.pattern_delete_btn.focus.set(false);
         self.pattern_zap_btn.focus.set(false);
-    }
-
-    pub fn get_bpm(&self) -> u16 {
-        let (min, max) = Row::Bpm.range();
-        u16::from_str_radix(&self.bpm_input.value::<String>(), 16)
-            .unwrap_or(min)
-            .clamp(min, max)
-    }
-
-    pub fn set_bpm(&mut self, bpm: u16) {
-        let (min, max) = Row::Bpm.range();
-        let clamped = bpm.clamp(min, max);
-        let s = format!("{:X}", clamped);
-        self.bpm_input.set_value(s.clone());
-        self.bpm_snapshot = s;
-    }
-
-    pub fn get_fx_speed(&self) -> u8 {
-        let (min, max) = Row::FxSpeed.range();
-        u16::from_str_radix(&self.fx_speed_input.value::<String>(), 16)
-            .unwrap_or(min)
-            .clamp(min, max) as u8
-    }
-
-    pub fn set_fx_speed(&mut self, speed: u8) {
-        let (min, max) = Row::FxSpeed.range();
-        let clamped = (speed as u16).clamp(min, max);
-        let s = format!("{:X}", clamped);
-        self.fx_speed_input.set_value(s.clone());
-        self.fx_speed_snapshot = s;
-    }
-
-    pub fn get_beats(&self) -> u8 {
-        u16::from_str_radix(&self.rows_input.value::<String>(), 16)
-            .unwrap_or(PATTERN_BEATS as u16)
-            .clamp(1, PATTERN_BEATS as u16) as u8
-    }
-
-    pub fn set_beats(&mut self, beats: u8) {
-        let clamped = (beats as u16).clamp(1, PATTERN_BEATS as u16);
-        let s = format!("{:X}", clamped);
-        self.rows_input.set_value(s.clone());
-        self.rows_snapshot = s;
+        self.take_edit_actions()
     }
 
     pub fn mark_export_success(&mut self) {
         self.export_feedback_until = Some(Instant::now() + Duration::from_secs(3));
     }
 
-    pub fn set_pattern_info(&mut self, pattern_idx: u8, pattern_count: usize, beats: u8) {
-        if pattern_idx != self.pattern_idx {
-            let s = format!("{:X}", beats);
-            self.rows_input.set_value(s.clone());
-            self.rows_snapshot = s;
-        }
+    pub fn set_pattern_info(&mut self, pattern_idx: u8, pattern_count: usize) {
         self.pattern_idx = pattern_idx;
         self.pattern_count = pattern_count.max(1);
     }
 
-    pub fn sync_beats_to_file(&self, file: &mut TrackerFile) {
-        file.set_beats_for(self.pattern_idx, self.get_beats());
+    pub fn set_validation_errors(&mut self, errors: &[ValidationError]) {
+        self.validation_errors = errors.to_vec();
+    }
+
+    fn refresh_from_file(&mut self, file: &TrackerFile) {
+        let editing = self.editing.then_some(self.selected_row);
+        let beats = file.beats_for(self.pattern_idx);
+        for (row, input, value) in [
+            (Row::Bpm, &mut self.bpm_input, file.bpm),
+            (Row::FxSpeed, &mut self.fx_speed_input, file.fx_speed as u16),
+            (Row::Beats, &mut self.rows_input, beats as u16),
+        ] {
+            if editing != Some(row) {
+                show_value(input, &format!("{:X}", value));
+            }
+        }
+        for (i, entry) in self.instruments.iter_mut().enumerate() {
+            if editing != Some(Row::Instrument(i)) {
+                show_value(&mut entry.name_input, &file.instruments[i].name);
+            }
+        }
+        for (i, entry) in self.envelopes.iter_mut().enumerate() {
+            if editing != Some(Row::Envelope(i)) {
+                let name = file.envelopes.get(i).map_or("", |e| e.name.as_str());
+                show_value(&mut entry.name_input, name);
+            }
+        }
+    }
+
+    fn take_edit_actions(&mut self) -> Vec<ComponentAction> {
+        if std::mem::take(&mut self.pattern_edited) {
+            vec![ComponentAction::PatternEdited]
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn get_transpose(&self) -> i32 {
@@ -614,116 +576,31 @@ impl ControlDeck {
         }
     }
 
-    fn take_snapshot(&mut self) {
-        match self.selected_row {
-            Row::Bpm => self.bpm_snapshot = self.bpm_input.value::<String>(),
-            Row::FxSpeed => self.fx_speed_snapshot = self.fx_speed_input.value::<String>(),
-            Row::Beats => self.rows_snapshot = self.rows_input.value::<String>(),
-            Row::Trans => self.trans_snapshot = self.trans_input.value::<String>(),
-            Row::Instrument(i) => {
-                let v = self.instruments[i].name_input.value::<String>();
-                self.instruments[i].name_snapshot = v;
-            }
-            Row::Envelope(i) => {
-                let v = self.envelopes[i].name_input.value::<String>();
-                self.envelopes[i].name_snapshot = v;
-            }
-            Row::ActionPlay
-            | Row::ActionNewOpen
-            | Row::ActionTuning
-            | Row::ActionQuit
-            | Row::ActionSave
-            | Row::ActionExport
-            | Row::PatternPrev
-            | Row::PatternNext
-            | Row::PatternNew
-            | Row::PatternCopy
-            | Row::PatternDelete
-            | Row::PatternZap => {}
-        }
-    }
-
-    fn restore_snapshot(&mut self) {
-        match self.selected_row {
-            Row::Bpm => {
-                let s = self.bpm_snapshot.clone();
-                self.bpm_input.set_value(s);
-            }
-            Row::FxSpeed => {
-                let s = self.fx_speed_snapshot.clone();
-                self.fx_speed_input.set_value(s);
-            }
-            Row::Beats => {
-                let s = self.rows_snapshot.clone();
-                self.rows_input.set_value(s);
-            }
-            Row::Trans => {
-                let s = self.trans_snapshot.clone();
-                self.trans_input.set_value(s);
-            }
-            Row::Instrument(i) => {
-                let s = self.instruments[i].name_snapshot.clone();
-                self.instruments[i].name_input.set_value(s);
-            }
-            Row::Envelope(i) => {
-                let s = self.envelopes[i].name_snapshot.clone();
-                self.envelopes[i].name_input.set_value(s);
-            }
-            Row::ActionPlay
-            | Row::ActionNewOpen
-            | Row::ActionTuning
-            | Row::ActionQuit
-            | Row::ActionSave
-            | Row::ActionExport
-            | Row::PatternPrev
-            | Row::PatternNext
-            | Row::PatternNew
-            | Row::PatternCopy
-            | Row::PatternDelete
-            | Row::PatternZap => {}
+    fn restore_snapshot(&mut self, file: &TrackerFile) {
+        if self.selected_row == Row::Trans {
+            let s = self.trans_snapshot.clone();
+            self.trans_input.set_value(s);
         }
         self.editing = false;
+        self.refresh_from_file(file);
     }
 
     fn start_editing(&mut self) {
         if self.selected_row.is_action() {
             return;
         }
-        self.take_snapshot();
+        if self.selected_row == Row::Trans {
+            self.trans_snapshot = self.trans_input.value::<String>();
+        }
         self.editing = true;
     }
 
-    fn confirm_editing(&mut self) {
+    fn confirm_editing(&mut self, file: &mut TrackerFile) {
+        self.editing = false;
         match self.selected_row {
-            Row::Bpm => {
-                let (min, max) = Row::Bpm.range();
-                let raw = self.bpm_input.value::<String>();
-                let clamped = u16::from_str_radix(&raw, 16)
-                    .map(|v| v.clamp(min, max))
-                    .unwrap_or(min);
-                let s = format!("{:X}", clamped);
-                self.bpm_input.set_value(s.clone());
-                self.bpm_snapshot = s;
-            }
-            Row::FxSpeed => {
-                let (min, max) = Row::FxSpeed.range();
-                let raw = self.fx_speed_input.value::<String>();
-                let clamped = u16::from_str_radix(&raw, 16)
-                    .map(|v| v.clamp(min, max))
-                    .unwrap_or(min);
-                let s = format!("{:X}", clamped);
-                self.fx_speed_input.set_value(s.clone());
-                self.fx_speed_snapshot = s;
-            }
-            Row::Beats => {
-                let (min, max) = Row::Beats.range();
-                let raw = self.rows_input.value::<String>();
-                let clamped = u16::from_str_radix(&raw, 16)
-                    .map(|v| v.clamp(min, max))
-                    .unwrap_or(min);
-                let s = format!("{:X}", clamped);
-                self.rows_input.set_value(s.clone());
-                self.rows_snapshot = s;
+            row @ (Row::Bpm | Row::FxSpeed | Row::Beats) => {
+                let raw = self.current_input_mut().value::<String>();
+                self.set_setting_value(file, row, parse_setting(row, &raw));
             }
             Row::Trans => {
                 let raw = self.trans_input.value::<String>();
@@ -738,12 +615,12 @@ impl ControlDeck {
                 self.trans_snapshot = s;
             }
             Row::Instrument(i) => {
-                let val = self.instruments[i].name_input.value::<String>();
-                self.instruments[i].name_snapshot = val;
+                file.instruments[i].name = self.instruments[i].name_input.value::<String>();
             }
             Row::Envelope(i) => {
-                let val = self.envelopes[i].name_input.value::<String>();
-                self.envelopes[i].name_snapshot = val;
+                if let Some(envelope) = file.envelopes.get_mut(i) {
+                    envelope.name = self.envelopes[i].name_input.value::<String>();
+                }
             }
             Row::ActionPlay
             | Row::ActionNewOpen
@@ -758,40 +635,31 @@ impl ControlDeck {
             | Row::PatternDelete
             | Row::PatternZap => {}
         }
-        self.editing = false;
+        self.refresh_from_file(file);
     }
 
-    fn get_setting_value(&self, row: Row) -> u16 {
-        let (min, max) = row.range();
-        let raw = match row {
-            Row::Bpm => self.bpm_input.value::<String>(),
-            Row::FxSpeed => self.fx_speed_input.value::<String>(),
-            Row::Beats => self.rows_input.value::<String>(),
-            _ => return min,
-        };
-        u16::from_str_radix(&raw, 16).unwrap_or(min).clamp(min, max)
-    }
-
-    fn set_setting_value(&mut self, row: Row, value: u16) {
-        let s = format!("{:X}", value);
+    fn get_setting_value(&self, file: &TrackerFile, row: Row) -> u16 {
         match row {
-            Row::Bpm => {
-                self.bpm_input.set_value(s.clone());
-                self.bpm_snapshot = s;
-            }
-            Row::FxSpeed => {
-                self.fx_speed_input.set_value(s.clone());
-                self.fx_speed_snapshot = s;
-            }
-            Row::Beats => {
-                self.rows_input.set_value(s.clone());
-                self.rows_snapshot = s;
+            Row::Bpm => file.bpm,
+            Row::FxSpeed => file.fx_speed as u16,
+            Row::Beats => file.beats_for(self.pattern_idx) as u16,
+            _ => row.range().0,
+        }
+    }
+
+    fn set_setting_value(&mut self, file: &mut TrackerFile, row: Row, value: u16) {
+        match row {
+            Row::Bpm => file.bpm = value,
+            Row::FxSpeed => file.fx_speed = value as u8,
+            Row::Beats if file.beats_for(self.pattern_idx) != value as u8 => {
+                file.set_beats_for(self.pattern_idx, value as u8);
+                self.pattern_edited = true;
             }
             _ => {}
         }
     }
 
-    fn increment(&mut self) {
+    fn increment(&mut self, file: &mut TrackerFile) {
         if self.selected_row == Row::Trans {
             let next = self.get_transpose() + 1;
             if self.is_transpose_valid(next) {
@@ -803,11 +671,12 @@ impl ControlDeck {
         }
         let row = self.selected_row;
         let (_, max) = row.range();
-        let val = self.get_setting_value(row).saturating_add(1).min(max);
-        self.set_setting_value(row, val);
+        let val = self.get_setting_value(file, row).saturating_add(1).min(max);
+        self.set_setting_value(file, row, val);
+        self.refresh_from_file(file);
     }
 
-    fn decrement(&mut self) {
+    fn decrement(&mut self, file: &mut TrackerFile) {
         if self.selected_row == Row::Trans {
             let next = self.get_transpose() - 1;
             if self.is_transpose_valid(next) {
@@ -819,11 +688,17 @@ impl ControlDeck {
         }
         let row = self.selected_row;
         let (min, _) = row.range();
-        let val = self.get_setting_value(row).saturating_sub(1).max(min);
-        self.set_setting_value(row, val);
+        let val = self.get_setting_value(file, row).saturating_sub(1).max(min);
+        self.set_setting_value(file, row, val);
+        self.refresh_from_file(file);
     }
 
-    fn handle_mouse_click(&mut self, pos: Position, actions: &mut Vec<ComponentAction>) -> bool {
+    fn handle_mouse_click(
+        &mut self,
+        pos: Position,
+        file: &mut TrackerFile,
+        actions: &mut Vec<ComponentAction>,
+    ) -> bool {
         let bpm_plus_area = self.bpm_plus.area;
         let bpm_minus_area = self.bpm_minus.area;
         let fx_speed_plus_area = self.fx_speed_plus.area;
@@ -839,81 +714,81 @@ impl ControlDeck {
 
         if bpm_plus_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::Bpm;
             self.selected_col = Col::Plus;
-            self.increment();
+            self.increment(file);
             self.update_focus_states();
             return true;
         }
         if bpm_minus_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::Bpm;
             self.selected_col = Col::Minus;
-            self.decrement();
+            self.decrement(file);
             self.update_focus_states();
             return true;
         }
         if fx_speed_plus_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::FxSpeed;
             self.selected_col = Col::Plus;
-            self.increment();
+            self.increment(file);
             self.update_focus_states();
             return true;
         }
         if fx_speed_minus_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::FxSpeed;
             self.selected_col = Col::Minus;
-            self.decrement();
+            self.decrement(file);
             self.update_focus_states();
             return true;
         }
         if rows_plus_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::Beats;
             self.selected_col = Col::Plus;
-            self.increment();
+            self.increment(file);
             self.update_focus_states();
             return true;
         }
         if rows_minus_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::Beats;
             self.selected_col = Col::Minus;
-            self.decrement();
+            self.decrement(file);
             self.update_focus_states();
             return true;
         }
         if trans_plus_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::Trans;
             self.selected_col = Col::Plus;
-            self.increment();
+            self.increment(file);
             self.update_focus_states();
             return true;
         }
         if trans_minus_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::Trans;
             self.selected_col = Col::Minus;
-            self.decrement();
+            self.decrement(file);
             self.update_focus_states();
             return true;
         }
@@ -922,7 +797,7 @@ impl ControlDeck {
                 return true;
             }
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::Bpm;
             self.selected_col = Col::Input;
@@ -936,7 +811,7 @@ impl ControlDeck {
                 return true;
             }
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::FxSpeed;
             self.selected_col = Col::Input;
@@ -949,7 +824,7 @@ impl ControlDeck {
                 return true;
             }
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::Beats;
             self.selected_col = Col::Input;
@@ -962,7 +837,7 @@ impl ControlDeck {
                 return true;
             }
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::Trans;
             self.selected_col = Col::Input;
@@ -974,7 +849,7 @@ impl ControlDeck {
         let play_area = self.action_play_btn.area;
         if play_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::ActionPlay;
             self.selected_col = Col::Open;
@@ -988,7 +863,7 @@ impl ControlDeck {
             let name_area = self.instruments[i].name_input.area;
             if open_area.contains(pos) {
                 if self.editing {
-                    self.confirm_editing();
+                    self.confirm_editing(file);
                 }
                 self.selected_row = Row::Instrument(i);
                 self.selected_col = Col::Open;
@@ -1004,7 +879,7 @@ impl ControlDeck {
                     return true;
                 }
                 if self.editing {
-                    self.confirm_editing();
+                    self.confirm_editing(file);
                 }
                 self.selected_row = Row::Instrument(i);
                 self.selected_col = Col::Input;
@@ -1019,7 +894,7 @@ impl ControlDeck {
             let name_area = self.envelopes[i].name_input.area;
             if open_area.contains(pos) {
                 if self.editing {
-                    self.confirm_editing();
+                    self.confirm_editing(file);
                 }
                 self.selected_row = Row::Envelope(i);
                 self.selected_col = Col::Open;
@@ -1035,7 +910,7 @@ impl ControlDeck {
                     return true;
                 }
                 if self.editing {
-                    self.confirm_editing();
+                    self.confirm_editing(file);
                 }
                 self.selected_row = Row::Envelope(i);
                 self.selected_col = Col::Input;
@@ -1053,7 +928,7 @@ impl ControlDeck {
 
         if tuning_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::ActionTuning;
             self.selected_col = Col::Open;
@@ -1063,7 +938,7 @@ impl ControlDeck {
         }
         if new_open_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::ActionNewOpen;
             self.selected_col = Col::Open;
@@ -1073,7 +948,7 @@ impl ControlDeck {
         }
         if quit_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::ActionQuit;
             self.selected_col = Col::Open;
@@ -1083,7 +958,7 @@ impl ControlDeck {
         }
         if save_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::ActionSave;
             self.selected_col = Col::Open;
@@ -1094,12 +969,11 @@ impl ControlDeck {
         }
         if export_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::ActionExport;
             self.selected_col = Col::Open;
             actions.push(ComponentAction::Export);
-            self.update_focus_states();
             self.update_focus_states();
             return true;
         }
@@ -1113,7 +987,7 @@ impl ControlDeck {
 
         if pattern_prev_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::PatternPrev;
             self.selected_col = Col::Open;
@@ -1123,7 +997,7 @@ impl ControlDeck {
         }
         if pattern_next_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::PatternNext;
             self.selected_col = Col::Open;
@@ -1133,7 +1007,7 @@ impl ControlDeck {
         }
         if pattern_new_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::PatternNew;
             self.selected_col = Col::Open;
@@ -1143,7 +1017,7 @@ impl ControlDeck {
         }
         if pattern_copy_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::PatternCopy;
             self.selected_col = Col::Open;
@@ -1153,7 +1027,7 @@ impl ControlDeck {
         }
         if pattern_delete_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::PatternDelete;
             self.selected_col = Col::Open;
@@ -1163,7 +1037,7 @@ impl ControlDeck {
         }
         if pattern_zap_area.contains(pos) {
             if self.editing {
-                self.confirm_editing();
+                self.confirm_editing(file);
             }
             self.selected_row = Row::PatternZap;
             self.selected_col = Col::Open;
@@ -1178,6 +1052,7 @@ impl ControlDeck {
 
 impl Component for ControlDeck {
     fn update(&mut self, events: Vec<Event>, file: &mut TrackerFile) -> Vec<ComponentAction> {
+        self.refresh_from_file(file);
         let mut actions = Vec::new();
 
         for event in &events {
@@ -1193,6 +1068,7 @@ impl Component for ControlDeck {
                             x: *column,
                             y: *row,
                         },
+                        file,
                         &mut actions,
                     ) {
                         actions.push(ComponentAction::RequestFocus);
@@ -1206,11 +1082,11 @@ impl Component for ControlDeck {
                     if self.editing {
                         match code {
                             KeyCode::Esc => {
-                                self.restore_snapshot();
+                                self.restore_snapshot(file);
                                 self.update_focus_states();
                             }
                             KeyCode::Enter => {
-                                self.confirm_editing();
+                                self.confirm_editing(file);
                                 self.update_focus_states();
                             }
                             KeyCode::Char(c)
@@ -1315,8 +1191,8 @@ impl Component for ControlDeck {
                             KeyCode::Enter => {
                                 match self.selected_col {
                                     Col::Input => self.start_editing(),
-                                    Col::Plus => self.increment(),
-                                    Col::Minus => self.decrement(),
+                                    Col::Plus => self.increment(file),
+                                    Col::Minus => self.decrement(file),
                                     Col::Open => match self.selected_row {
                                         Row::ActionPlay => {
                                             actions.push(ComponentAction::Play);
@@ -1376,11 +1252,12 @@ impl Component for ControlDeck {
                 _ => {}
             }
         }
-        self.sync_beats_to_file(file);
+        actions.extend(self.take_edit_actions());
         actions
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, _file: &TrackerFile) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, file: &TrackerFile) {
+        self.refresh_from_file(file);
         let bg = SCHEME.true_dark_color(SCHEME.black[3]);
         frame.render_widget(Block::new().style(Style::new().bg(bg)), area);
 
@@ -1517,13 +1394,18 @@ impl Component for ControlDeck {
             );
         }
 
-        const PLAY_BTN_W: u16 = 7;
         let play_focused = sel_row == Row::ActionPlay;
-        let play_label = if self.playing { "[Pause]" } else { "[Play]" };
+        let play_label = if self.playing {
+            "[Pause]".to_string()
+        } else if let Some(error) = self.validation_errors.first() {
+            format!("[Error on Pattern {:02}]", error.pattern)
+        } else {
+            "[Play]".to_string()
+        };
         let play_area = Rect {
             x: setting_rows[6].x,
             y: setting_rows[6].y,
-            width: PLAY_BTN_W.min(setting_rows[6].width),
+            width: (play_label.len() as u16).min(setting_rows[6].width),
             height: 1,
         };
         self.action_play_btn.focus.set(play_focused);

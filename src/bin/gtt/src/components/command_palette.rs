@@ -15,22 +15,20 @@ use crate::{
 };
 
 pub struct CommandPalette {
-    pub visible: bool,
     input: TextInputState,
 }
 
 impl CommandPalette {
     pub fn init() -> Self {
         Self {
-            visible: false,
             input: TextInputState::new_focused(),
         }
     }
 
     fn execute(&mut self) -> Vec<ComponentAction> {
-        let actions = parse_command(&self.input.value::<String>());
+        let mut actions = vec![ComponentAction::CloseModal];
+        actions.extend(parse_command(&self.input.value::<String>()));
         self.input.set_value("");
-        self.visible = false;
         actions
     }
 }
@@ -100,12 +98,12 @@ impl Component for CommandPalette {
                 match code {
                     KeyCode::Esc => {
                         self.input.set_value("");
-                        self.visible = false;
-                        continue;
+                        actions.push(ComponentAction::CloseModal);
+                        break;
                     }
                     KeyCode::Enter => {
                         actions.extend(self.execute());
-                        continue;
+                        break;
                     }
                     _ => {}
                 }

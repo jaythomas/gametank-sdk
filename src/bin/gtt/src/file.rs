@@ -4,10 +4,11 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::tracker::{
-    Beat, ChannelCmd, ENVELOPE_MAX_STEPS, MAX_VOLUME, NUM_ENVELOPES, Pattern, WAVEFORM_SAMPLES,
-    empty_pattern,
+    Beat, ChannelCmd, ENVELOPE_MAX_STEPS, MAX_FX_SPEED, MAX_TEMPO, MAX_VOLUME, NUM_ENVELOPES,
+    PATTERN_BEATS, Pattern, WAVEFORM_SAMPLES, empty_pattern,
 };
 
+pub const MAX_PATTERNS: usize = u8::MAX as usize;
 pub const NUM_INSTRUMENTS: usize = 8;
 pub const SCHEMA_VERSION: u8 = 1;
 
@@ -86,9 +87,10 @@ where
         }
         let mut pattern: Pattern = empty_pattern();
         for (ch_idx, channel) in pattern_vec.iter().enumerate() {
-            if channel.len() != 64 {
+            if channel.len() != PATTERN_BEATS {
                 return Err(D::Error::custom(format!(
-                    "Expected 64 beats in channel {}, got {}",
+                    "Expected {} beats in channel {}, got {}",
+                    PATTERN_BEATS,
                     ch_idx,
                     channel.len()
                 )));
@@ -222,7 +224,7 @@ pub fn default_tuning() -> TuningData {
 }
 
 fn default_pattern_beats() -> Vec<u8> {
-    vec![64]
+    vec![PATTERN_BEATS as u8]
 }
 
 /// `steps` values running from `from` to `to` inclusive.
@@ -364,7 +366,7 @@ impl TrackerFile {
             tuning: default_tuning(),
             envelopes: default_envelopes(),
             patterns: vec![empty_pattern()],
-            pattern_beats: vec![64],
+            pattern_beats: vec![PATTERN_BEATS as u8],
             bpm: 120,
             fx_speed: 6,
         }
@@ -385,26 +387,25 @@ impl TrackerFile {
             self.patterns.push(empty_pattern());
         }
         while idx >= self.pattern_beats.len() {
-            self.pattern_beats.push(64);
+            self.pattern_beats.push(PATTERN_BEATS as u8);
         }
         &mut self.patterns[idx]
     }
 
     pub fn beats_for(&self, pattern_idx: u8) -> u8 {
         let idx = pattern_idx as usize;
-        self.pattern_beats.get(idx).copied().unwrap_or(64)
+        self.pattern_beats
+            .get(idx)
+            .copied()
+            .unwrap_or(PATTERN_BEATS as u8)
     }
 
     pub fn set_beats_for(&mut self, pattern_idx: u8, beats: u8) {
         let idx = pattern_idx as usize;
         while idx >= self.pattern_beats.len() {
-            self.pattern_beats.push(64);
+            self.pattern_beats.push(PATTERN_BEATS as u8);
         }
-        self.pattern_beats[idx] = beats.clamp(1, crate::tracker::PATTERN_BEATS as u8);
-    }
-
-    pub fn instrument_names(&self) -> [String; NUM_INSTRUMENTS] {
-        std::array::from_fn(|i| self.instruments[i].name.clone())
+        self.pattern_beats[idx] = beats.clamp(1, PATTERN_BEATS as u8);
     }
 
     pub fn instrument_waveform(&self, idx: usize) -> [u8; 256] {
@@ -420,6 +421,13 @@ impl TrackerFile {
             return Err(format!(
                 "unsupported schema version {} (expected {} or lower)",
                 self.schema_version, SCHEMA_VERSION
+            ));
+        }
+        if self.patterns.len() > MAX_PATTERNS {
+            return Err(format!(
+                "file has {} patterns (maximum {})",
+                self.patterns.len(),
+                MAX_PATTERNS
             ));
         }
         Ok(())
@@ -481,8 +489,10 @@ impl TrackerFile {
         file.validate()
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         file.migrate();
+        file.bpm = file.bpm.clamp(1, MAX_TEMPO);
+        file.fx_speed = file.fx_speed.clamp(1, MAX_FX_SPEED);
         while file.pattern_beats.len() < file.patterns.len() {
-            file.pattern_beats.push(64);
+            file.pattern_beats.push(PATTERN_BEATS as u8);
         }
         file.pattern_beats.truncate(file.patterns.len().max(1));
         Ok(file)

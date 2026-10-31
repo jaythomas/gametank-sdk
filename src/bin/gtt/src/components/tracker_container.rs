@@ -10,11 +10,10 @@ use crate::{
     action::ComponentAction,
     component::Component,
     components::{ControlDeck, pattern_editor::PatternEditor},
-    file::{NUM_INSTRUMENTS, TrackerFile, TuningData},
+    file::{TrackerFile, TuningData},
     scheme::SCHEME,
-    tracker::{
-        BeatRow, NUM_ENVELOPES, PATTERN_TABLE_WIDTH, delete_rows, paste_rows, yank_rows,
-    },
+    tracker::{BeatRow, PATTERN_TABLE_WIDTH, delete_rows, paste_rows, yank_rows},
+    validation::ValidationError,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,12 +39,7 @@ pub struct TrackerContainer {
 
 impl TrackerContainer {
     pub fn init(file: &TrackerFile) -> Self {
-        let mut control_deck = ControlDeck::init();
-        control_deck.set_names(&file.instrument_names());
-        control_deck.set_envelope_names(&file.envelope_names());
-        control_deck.set_bpm(file.bpm);
-        control_deck.set_fx_speed(file.fx_speed);
-        control_deck.set_beats(file.beats_for(0));
+        let control_deck = ControlDeck::init();
         let mut pattern_editor = PatternEditor::init();
         pattern_editor.set_tuning(file.tuning.clone());
         let mut tc = TrackerContainer {
@@ -55,22 +49,6 @@ impl TrackerContainer {
         };
         tc.update_tuning_context(&file.tuning);
         tc
-    }
-
-    pub fn get_instrument_names(&self) -> [String; NUM_INSTRUMENTS] {
-        self.control_deck.get_names()
-    }
-
-    pub fn get_envelope_names(&self) -> [String; NUM_ENVELOPES] {
-        self.control_deck.get_envelope_names()
-    }
-
-    pub fn get_bpm(&self) -> u16 {
-        self.control_deck.get_bpm()
-    }
-
-    pub fn get_fx_speed(&self) -> u8 {
-        self.control_deck.get_fx_speed()
     }
 
     pub fn pattern_idx(&self) -> u8 {
@@ -88,6 +66,11 @@ impl TrackerContainer {
         self.pattern_editor.playing = playing;
     }
 
+    pub fn set_validation_errors(&mut self, errors: &[ValidationError]) {
+        self.control_deck.set_validation_errors(errors);
+        self.pattern_editor.set_validation_errors(errors);
+    }
+
     pub fn mark_export_success(&mut self) {
         self.control_deck.mark_export_success();
     }
@@ -98,10 +81,6 @@ impl TrackerContainer {
 
     pub fn set_current_row(&mut self, row: u8) {
         self.pattern_editor.sel_y = row;
-    }
-
-    pub fn set_beats(&mut self, beats: u8) {
-        self.control_deck.set_beats(beats);
     }
 
     pub fn is_editing_field(&self) -> bool {
@@ -119,7 +98,6 @@ impl TrackerContainer {
         let (removed, new_beats) =
             delete_rows(file.current_pattern_mut(idx), beats, self.current_row(), count)?;
         file.set_beats_for(idx, new_beats);
-        self.set_beats(new_beats);
         self.pattern_editor.end_cell_edit();
         Some(removed)
     }
@@ -138,7 +116,6 @@ impl TrackerContainer {
         let at = if below { (row + 1).min(beats) } else { row };
         if let Some(new_beats) = paste_rows(file.current_pattern_mut(idx), beats, at, clip) {
             file.set_beats_for(idx, new_beats);
-            self.set_beats(new_beats);
             self.pattern_editor.end_cell_edit();
         }
     }
@@ -197,11 +174,8 @@ impl TrackerContainer {
 
 impl Component for TrackerContainer {
     fn update(&mut self, events: Vec<Event>, file: &mut TrackerFile) -> Vec<ComponentAction> {
-        self.control_deck.set_pattern_info(
-            self.pattern_editor.pattern_idx,
-            file.patterns.len(),
-            file.beats_for(self.pattern_editor.pattern_idx),
-        );
+        self.control_deck
+            .set_pattern_info(self.pattern_editor.pattern_idx, file.patterns.len());
         let mut actions_out = Vec::new();
         let mut keyboard_pass: Vec<Event> = Vec::with_capacity(events.len());
         let mut mouse_pass: Vec<Event> = Vec::new();
@@ -214,7 +188,8 @@ impl Component for TrackerContainer {
                     ..
                 }) => {
                     if self.active_focus == AppFocus::ControlDeck {
-                        self.control_deck.blur_all();
+                        let actions = self.control_deck.blur_all(file);
+                        actions_out.extend(self.bubble_actions(actions));
                     }
                     self.active_focus = self.active_focus.next();
                 }
@@ -256,7 +231,8 @@ impl Component for TrackerContainer {
                 actions_out.extend(self.bubble_actions(actions));
             }
             AppFocus::PatternEditor => {
-                self.pattern_editor.update(keyboard_pass, file);
+                let actions = self.pattern_editor.update(keyboard_pass, file);
+                actions_out.extend(self.bubble_actions(actions));
             }
         }
 
@@ -267,11 +243,8 @@ impl Component for TrackerContainer {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, file: &TrackerFile) {
-        self.control_deck.set_pattern_info(
-            self.pattern_editor.pattern_idx,
-            file.patterns.len(),
-            file.beats_for(self.pattern_editor.pattern_idx),
-        );
+        self.control_deck
+            .set_pattern_info(self.pattern_editor.pattern_idx, file.patterns.len());
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints(vec![

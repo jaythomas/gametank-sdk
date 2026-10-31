@@ -34,7 +34,6 @@ enum Btn {
 }
 
 pub struct ExportConfirmModal {
-    pub visible: bool,
     state: ModalState,
     focused: Btn,
     path: PathBuf,
@@ -45,7 +44,6 @@ pub struct ExportConfirmModal {
 impl ExportConfirmModal {
     pub fn init() -> Self {
         Self {
-            visible: false,
             state: ModalState::Confirm,
             focused: Btn::Cancel,
             path: PathBuf::new(),
@@ -55,14 +53,12 @@ impl ExportConfirmModal {
     }
 
     pub fn open(&mut self, path: PathBuf) {
-        self.visible = true;
         self.state = ModalState::Confirm;
         self.focused = Btn::Cancel;
         self.path = path;
     }
 
     pub fn open_error(&mut self, path: PathBuf) {
-        self.visible = true;
         self.state = ModalState::Error;
         self.focused = Btn::Cancel;
         self.path = path;
@@ -84,7 +80,8 @@ impl Component for ExportConfirmModal {
                     kind: KeyEventKind::Press,
                     ..
                 }) => {
-                    self.visible = false;
+                    actions.push(ComponentAction::CloseModal);
+                    break;
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Left,
@@ -110,7 +107,8 @@ impl Component for ExportConfirmModal {
                     ..
                 }) => match (self.state, self.focused) {
                     (_, Btn::Cancel) => {
-                        self.visible = false;
+                        actions.push(ComponentAction::CloseModal);
+                        break;
                     }
                     (ModalState::Confirm, Btn::Export) => {
                         actions.push(ComponentAction::ConfirmExport(self.path.clone()));
@@ -128,7 +126,8 @@ impl Component for ExportConfirmModal {
                         y: *row,
                     };
                     if self.cancel_button.area.contains(pos) {
-                        self.visible = false;
+                        actions.push(ComponentAction::CloseModal);
+                        break;
                     } else if self.export_button.area.contains(pos)
                         && self.state == ModalState::Confirm
                     {

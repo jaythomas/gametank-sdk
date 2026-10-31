@@ -19,6 +19,7 @@ pub const MAX_FX_ID: u8 = FX_ID_ENVELOPE;
 pub const MAX_INSTRUMENT_INDEX: u8 = crate::file::NUM_INSTRUMENTS as u8 - 1;
 pub const WAVEFORM_SAMPLES: usize = 256;
 pub const BEAT_THRESHOLD: u16 = 3600;
+pub const MAX_FX_SPEED: u8 = 31;
 pub const MAX_TEMPO: u16 = 1800;
 
 pub const NUM_ENVELOPES: usize = 8;

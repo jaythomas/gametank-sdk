@@ -263,8 +263,6 @@ but arrays a pattern never uses are omitted entirely.
 | 0                  | `u16` | Reserved, always `0x0000`. An index of 0 means "no note" |
 | 1 ...              | `u16` | 16-bit phase increment for one distinct pitch            |
 
-Exporting fails if a track needs more than 255 distinct frequencies.
-
 **4. Pattern data blocks**, one per patterns table entry. Located at the offset given by that entry. Each block starts with a 3-byte header:
 
 | offset | type | field          | description                                                                            |

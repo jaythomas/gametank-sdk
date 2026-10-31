@@ -22,14 +22,28 @@ use crate::{
     },
     config::{GttConfig, build_key_assignments, config_to_tuning_keys},
     export,
-    file::{NUM_INSTRUMENTS, TrackerFile},
+    file::{MAX_PATTERNS, NUM_INSTRUMENTS, TrackerFile},
     player::Player,
-    tracker::{BeatRow, NUM_ENVELOPES},
+    tracker::{BeatRow, NUM_ENVELOPES, PATTERN_BEATS},
+    validation::{ValidationError, validate_track},
 };
+
+#[derive(Clone, Copy)]
+enum Modal {
+    CommandPalette,
+    EnvelopeEditor,
+    ExportConfirm,
+    FileBrowser,
+    InstrumentEditor,
+    PatternDeleteConfirm,
+    QuitConfirm,
+    TuningEditor,
+}
 
 pub struct App {
     input_path: PathBuf,
     keyboard_enhanced: bool,
+    modal: Option<Modal>,
     terminal: DefaultTerminal,
     tracker_container: TrackerContainer,
     file_data: TrackerFile,
@@ -44,6 +58,7 @@ pub struct App {
     export_confirm: ExportConfirmModal,
     pattern_delete_confirm: PatternDeleteConfirmModal,
     player: Option<Player>,
+    validation_errors: Vec<ValidationError>,
 }
 
 impl App {
@@ -68,13 +83,16 @@ impl App {
         let tracker_container = TrackerContainer::init(&file_data);
         let player = Player::new(120);
         let mut file_browser = FileBrowser::new();
-        if no_file {
-            file_browser.visible = true;
+        let modal = if no_file {
             file_browser.open_file_explorer();
-        }
-        Ok(Self {
+            Some(Modal::FileBrowser)
+        } else {
+            None
+        };
+        let mut app = Self {
             input_path,
             keyboard_enhanced,
+            modal,
             terminal,
             tracker_container,
             file_data,
@@ -89,20 +107,13 @@ impl App {
             export_confirm: ExportConfirmModal::init(),
             pattern_delete_confirm: PatternDeleteConfirmModal::init(),
             player,
-        })
+            validation_errors: Vec::new(),
+        };
+        app.revalidate();
+        Ok(app)
     }
 
     fn write_file(&mut self) -> std::io::Result<()> {
-        let names = self.tracker_container.get_instrument_names();
-        for (i, name) in names.iter().enumerate() {
-            self.file_data.instruments[i].name = name.clone();
-        }
-        let envelope_names = self.tracker_container.get_envelope_names();
-        for (i, name) in envelope_names.iter().enumerate() {
-            self.file_data.envelopes[i].name = name.clone();
-        }
-        self.file_data.bpm = self.tracker_container.get_bpm();
-        self.file_data.fx_speed = self.tracker_container.get_fx_speed();
         self.file_data.save(&self.input_path)
     }
 
@@ -120,14 +131,20 @@ impl App {
     }
 
     fn run_export(&self, export_dir: &Path) -> std::io::Result<()> {
-        let bpm = self.tracker_container.get_bpm();
-        let fx_speed = self.tracker_container.get_fx_speed();
         let stem = self
             .input_path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "track".to_string());
-        export::export_all(&self.file_data, bpm, fx_speed, &stem, export_dir)
+        export::export_all(&self.file_data, &stem, export_dir)
+    }
+
+    fn open_modal(&mut self, modal: Modal) -> bool {
+        if self.modal.is_some() {
+            return false;
+        }
+        self.modal = Some(modal);
+        true
     }
 
     fn go_to_pattern(&mut self, offset: isize) {
@@ -166,51 +183,52 @@ impl App {
 
             let events = poll_events();
 
-            let actions = if self.quit_confirm.visible {
-                self.quit_confirm.update(events, &mut self.file_data)
-            } else if self.export_confirm.visible {
-                self.export_confirm.update(events, &mut self.file_data)
-            } else if self.pattern_delete_confirm.visible {
-                self.pattern_delete_confirm.update(events, &mut self.file_data)
-            } else if self.instrument_editor.visible {
-                self.instrument_editor.update(events, &mut self.file_data)
-            } else if self.envelope_editor.visible {
-                self.envelope_editor.update(events, &mut self.file_data)
-            } else if self.tuning_editor.visible {
-                self.tuning_editor.update(events, &mut self.file_data)
-            } else if self.file_browser.visible {
-                self.file_browser.update(events, &mut self.file_data)
-            } else if self.command_palette.visible {
-                self.command_palette.update(events, &mut self.file_data)
-            } else {
-                let mut hotkey_actions = Vec::new();
-                let mut tc_events = Vec::with_capacity(events.len());
-                for e in events {
-                    let Event::Key(key) = &e else {
-                        tc_events.push(e);
-                        continue;
-                    };
-                    if is_palette_key(key) && !self.tracker_container.is_editing_field() {
-                        self.command_palette.visible = true;
-                    } else if let Some(action) = hotkey_action(key)
-                        && self.tracker_container.accepts_hotkeys()
-                    {
-                        hotkey_actions.push(action);
-                    } else {
-                        tc_events.push(e);
-                    }
+            let file = &mut self.file_data;
+            let actions = match self.modal {
+                Some(Modal::CommandPalette) => self.command_palette.update(events, file),
+                Some(Modal::EnvelopeEditor) => self.envelope_editor.update(events, file),
+                Some(Modal::ExportConfirm) => self.export_confirm.update(events, file),
+                Some(Modal::FileBrowser) => self.file_browser.update(events, file),
+                Some(Modal::InstrumentEditor) => self.instrument_editor.update(events, file),
+                Some(Modal::PatternDeleteConfirm) => {
+                    self.pattern_delete_confirm.update(events, file)
                 }
-                let mut actions = self
-                    .tracker_container
-                    .update(tc_events, &mut self.file_data);
-                actions.extend(hotkey_actions);
-                actions
+                Some(Modal::QuitConfirm) => self.quit_confirm.update(events, file),
+                Some(Modal::TuningEditor) => self.tuning_editor.update(events, file),
+                None => {
+                    let mut hotkey_actions = Vec::new();
+                    let mut tc_events = Vec::with_capacity(events.len());
+                    let mut events = events.into_iter();
+                    for e in events.by_ref() {
+                        let Event::Key(key) = &e else {
+                            tc_events.push(e);
+                            continue;
+                        };
+                        if is_palette_key(key) && !self.tracker_container.is_editing_field() {
+                            self.modal = Some(Modal::CommandPalette);
+                            break;
+                        } else if let Some(action) = hotkey_action(key)
+                            && self.tracker_container.accepts_hotkeys()
+                        {
+                            hotkey_actions.push(action);
+                        } else {
+                            tc_events.push(e);
+                        }
+                    }
+                    let mut actions = self.tracker_container.update(tc_events, file);
+                    actions.extend(hotkey_actions);
+                    if self.modal.is_some() {
+                        actions.extend(self.command_palette.update(events.collect(), file));
+                    }
+                    actions
+                }
             };
 
             if self.handle_actions(actions)? {
                 return Ok(());
             }
 
+            let modal = self.modal;
             let tc = &mut self.tracker_container;
             let cp = &mut self.command_palette;
             let ie = &mut self.instrument_editor;
@@ -224,8 +242,8 @@ impl App {
             self.terminal.draw(|f| {
                 let area = f.area();
                 tc.render(f, area, file);
-                if cp.visible {
-                    cp.render(
+                match modal {
+                    Some(Modal::CommandPalette) => cp.render(
                         f,
                         Rect {
                             y: area.bottom().saturating_sub(1),
@@ -233,28 +251,15 @@ impl App {
                             ..area
                         },
                         file,
-                    );
-                }
-                if ie.visible {
-                    ie.render(f, area, file);
-                }
-                if ee.visible {
-                    ee.render(f, area, file);
-                }
-                if te.visible {
-                    te.render(f, area, file);
-                }
-                if fb.visible {
-                    fb.render(f, area, file);
-                }
-                if qc.visible {
-                    qc.render(f, area, file);
-                }
-                if ec.visible {
-                    ec.render(f, area, file);
-                }
-                if pdc.visible {
-                    pdc.render(f, area, file);
+                    ),
+                    Some(Modal::EnvelopeEditor) => ee.render(f, area, file),
+                    Some(Modal::ExportConfirm) => ec.render(f, area, file),
+                    Some(Modal::FileBrowser) => fb.render(f, area, file),
+                    Some(Modal::InstrumentEditor) => ie.render(f, area, file),
+                    Some(Modal::PatternDeleteConfirm) => pdc.render(f, area, file),
+                    Some(Modal::QuitConfirm) => qc.render(f, area, file),
+                    Some(Modal::TuningEditor) => te.render(f, area, file),
+                    None => {}
                 }
             })?;
         }
@@ -262,12 +267,14 @@ impl App {
 
     fn handle_actions(&mut self, actions: Vec<ComponentAction>) -> std::io::Result<bool> {
         for action in actions {
+            let edits_track = edits_track(&action);
             match action {
+                ComponentAction::CloseModal => self.modal = None,
                 ComponentAction::ConfirmExport(path) => {
                     let _ = std::fs::remove_dir_all(&path);
                     match self.run_export(&path) {
                         Ok(()) => {
-                            self.export_confirm.visible = false;
+                            self.modal = None;
                             self.tracker_container.mark_export_success();
                         }
                         Err(_) => {
@@ -295,11 +302,15 @@ impl App {
                 ComponentAction::Export => {
                     let export_dir = self.export_dir();
                     if export_dir.exists() {
-                        self.export_confirm.open(export_dir);
+                        if self.open_modal(Modal::ExportConfirm) {
+                            self.export_confirm.open(export_dir);
+                        }
                     } else {
                         let export_dir = export_dir.clone();
                         if self.run_export(&export_dir).is_err() {
-                            self.export_confirm.open_error(export_dir);
+                            if self.open_modal(Modal::ExportConfirm) {
+                                self.export_confirm.open_error(export_dir);
+                            }
                         } else {
                             self.tracker_container.mark_export_success();
                         }
@@ -335,35 +346,44 @@ impl App {
                     }
                 },
                 ComponentAction::OpenFileBrowser => {
-                    self.file_browser.visible = true;
-                    if self.file_browser.file_explorer.is_none() {
+                    if self.open_modal(Modal::FileBrowser)
+                        && self.file_browser.file_explorer.is_none()
+                    {
                         self.file_browser.open_file_explorer();
                     }
                 }
                 ComponentAction::OpenInstrumentEditor(idx) => {
-                    let name = self.tracker_container.get_instrument_names()[idx].clone();
-                    let waveform = self.file_data.instrument_waveform(idx);
-                    self.instrument_editor.open(idx, &name, &waveform);
+                    if self.open_modal(Modal::InstrumentEditor) {
+                        let name = &self.file_data.instruments[idx].name;
+                        let waveform = self.file_data.instrument_waveform(idx);
+                        self.instrument_editor.open(idx, name, &waveform);
+                    }
                 }
                 ComponentAction::OpenEnvelopeEditor(idx) => {
-                    let name = self.tracker_container.get_envelope_names()[idx].clone();
-                    let steps = self.file_data.envelope_steps(idx);
-                    self.envelope_editor.open(idx, &name, &steps);
+                    if self.open_modal(Modal::EnvelopeEditor) {
+                        let name = self.file_data.envelope_names()[idx].clone();
+                        let steps = self.file_data.envelope_steps(idx);
+                        self.envelope_editor.open(idx, &name, &steps);
+                    }
                 }
                 ComponentAction::OpenPatternDeleteConfirm => {
                     if self.file_data.patterns.len() <= 1 {
                         let idx = self.tracker_container.pattern_idx();
                         *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
-                        self.file_data.set_beats_for(idx, 64);
-                    } else {
+                        self.file_data.set_beats_for(idx, PATTERN_BEATS as u8);
+                    } else if self.open_modal(Modal::PatternDeleteConfirm) {
                         self.pattern_delete_confirm.open();
                     }
                 }
                 ComponentAction::OpenQuitConfirm => {
-                    self.quit_confirm.open();
+                    if self.open_modal(Modal::QuitConfirm) {
+                        self.quit_confirm.open();
+                    }
                 }
                 ComponentAction::OpenTuningEditor => {
-                    self.tuning_editor.open(&self.file_data.tuning);
+                    if self.open_modal(Modal::TuningEditor) {
+                        self.tuning_editor.open(&self.file_data.tuning);
+                    }
                 }
                 ComponentAction::PasteAbove | ComponentAction::PasteBelow => {
                     self.tracker_container.paste_beats(
@@ -373,6 +393,9 @@ impl App {
                     );
                 }
                 ComponentAction::PatternCopy => {
+                    if self.file_data.patterns.len() >= MAX_PATTERNS {
+                        continue;
+                    }
                     let idx = self.tracker_container.pattern_idx() as usize;
                     let copy = self.file_data.current_pattern(idx as u8).clone();
                     let beats = self.file_data.beats_for(idx as u8);
@@ -385,7 +408,7 @@ impl App {
                     let idx = self.tracker_container.pattern_idx() as usize;
                     if self.file_data.patterns.len() <= 1 {
                         self.file_data.patterns[0] = crate::tracker::empty_pattern();
-                        self.file_data.pattern_beats[0] = 64;
+                        self.file_data.pattern_beats[0] = PATTERN_BEATS as u8;
                     } else if idx < self.file_data.patterns.len() {
                         self.file_data.patterns.remove(idx);
                         if idx < self.file_data.pattern_beats.len() {
@@ -396,14 +419,20 @@ impl App {
                         self.tracker_container.set_pattern_idx(new_idx);
                     }
                 }
+                ComponentAction::PatternEdited => {}
                 ComponentAction::PatternGoTo(offset) => self.go_to_pattern(offset),
                 ComponentAction::PatternNew => {
+                    if self.file_data.patterns.len() >= MAX_PATTERNS {
+                        continue;
+                    }
                     let idx = self.tracker_container.pattern_idx() as usize;
                     let insert_at = (idx + 1).min(self.file_data.patterns.len());
                     self.file_data
                         .patterns
                         .insert(insert_at, crate::tracker::empty_pattern());
-                    self.file_data.pattern_beats.insert(insert_at, 64);
+                    self.file_data
+                        .pattern_beats
+                        .insert(insert_at, PATTERN_BEATS as u8);
                     self.tracker_container.set_pattern_idx(insert_at as u8);
                 }
                 ComponentAction::PatternNext => self.go_to_pattern(1),
@@ -411,14 +440,14 @@ impl App {
                 ComponentAction::PatternZap => {
                     let idx = self.tracker_container.pattern_idx();
                     *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
-                    self.file_data.set_beats_for(idx, 64);
+                    self.file_data.set_beats_for(idx, PATTERN_BEATS as u8);
                 }
                 ComponentAction::Play => {
                     if let Some(player) = &self.player {
                         if player.is_playing() {
                             player.pause();
                             self.tracker_container.set_playing(false);
-                        } else {
+                        } else if self.validation_errors.is_empty() {
                             let row = self.tracker_container.current_row() as usize;
                             let pattern_idx = self.tracker_container.pattern_idx() as usize;
                             let patterns = self.file_data.patterns.clone();
@@ -433,8 +462,8 @@ impl App {
                                     .map(|i| self.file_data.envelope_steps(i))
                                     .collect(),
                             );
-                            player.set_bpm(self.tracker_container.get_bpm());
-                            player.set_fx_speed(self.tracker_container.get_fx_speed());
+                            player.set_bpm(self.file_data.bpm);
+                            player.set_fx_speed(self.file_data.fx_speed);
                             player.play(pattern_idx, row);
                             self.tracker_container.set_playing(true);
                         }
@@ -492,9 +521,35 @@ impl App {
                     }
                 }
             }
+            if edits_track {
+                self.revalidate();
+            }
         }
         Ok(false)
     }
+
+    fn revalidate(&mut self) {
+        self.validation_errors = validate_track(&self.file_data);
+        self.tracker_container
+            .set_validation_errors(&self.validation_errors);
+    }
+}
+
+fn edits_track(action: &ComponentAction) -> bool {
+    matches!(
+        action,
+        ComponentAction::CreateNewFile(_)
+            | ComponentAction::DeleteBeats(_)
+            | ComponentAction::OpenFile(_)
+            | ComponentAction::OpenPatternDeleteConfirm
+            | ComponentAction::PasteAbove
+            | ComponentAction::PasteBelow
+            | ComponentAction::PatternCopy
+            | ComponentAction::PatternDelete
+            | ComponentAction::PatternEdited
+            | ComponentAction::PatternNew
+            | ComponentAction::PatternZap
+    )
 }
 
 fn hotkey_action(key: &KeyEvent) -> Option<ComponentAction> {

@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const PATTERN_TABLE_WIDTH: u16 = 104;
-pub const PATTERN_BEATS: usize = 64;
+pub const DEFAULT_PATTERN_BEATS: usize = 64;
+pub const PATTERN_BEATS: usize = 255;
 
 pub type Pattern = [[Beat; PATTERN_BEATS]; 8];
 
@@ -47,6 +48,9 @@ pub struct Beat {
 }
 
 impl Beat {
+    pub fn is_empty(&self) -> bool {
+        self.cmd_list.is_empty() && self.sqc.is_none()
+    }
     // Returns the active channel Fx command (if any) as (fx_id, x, y)
     pub fn fx(&self) -> Option<(u8, u8, Option<u8>)> {
         self.cmd_list.iter().find_map(|c| match c {
@@ -150,4 +154,39 @@ pub fn paste_rows(pattern: &mut Pattern, beats: u8, at: u8, clip: &[BeatRow]) ->
         }
     }
     Some((beats + n) as u8)
+}
+
+pub fn row_after_doubling(beats: u8, row: u8) -> u8 {
+    let spaced = beats.min(PATTERN_BEATS as u8 - beats);
+    if row < spaced { row * 2 } else { row + spaced }
+}
+
+pub fn double_rows(pattern: &mut Pattern, beats: u8) -> Option<u8> {
+    let new_beats = beats + beats.min(PATTERN_BEATS as u8 - beats);
+    if new_beats == beats {
+        return None;
+    }
+    for lane in pattern.iter_mut() {
+        for beat in &mut lane[beats as usize..new_beats as usize] {
+            *beat = Beat::default();
+        }
+        for row in (1..beats).rev() {
+            lane[row_after_doubling(beats, row) as usize] =
+                std::mem::take(&mut lane[row as usize]);
+        }
+    }
+    Some(new_beats)
+}
+
+pub fn remap_jump_targets(patterns: &mut [Pattern], target_pattern: u8, remap: impl Fn(u8) -> u8) {
+    for pattern in patterns {
+        for beat in &mut pattern[0] {
+            if let Some(SequencerCmd::Jump(pat, target) | SequencerCmd::CountJump(pat, target)) =
+                &mut beat.sqc
+                && *pat == target_pattern
+            {
+                *target = remap(*target);
+            }
+        }
+    }
 }

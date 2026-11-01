@@ -4,13 +4,13 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::tracker::{
-    Beat, ChannelCmd, ENVELOPE_MAX_STEPS, MAX_FX_SPEED, MAX_TEMPO, MAX_VOLUME, NUM_ENVELOPES,
-    PATTERN_BEATS, Pattern, WAVEFORM_SAMPLES, empty_pattern,
+    Beat, ChannelCmd, DEFAULT_PATTERN_BEATS, ENVELOPE_MAX_STEPS, MAX_FX_SPEED, MAX_TEMPO,
+    MAX_VOLUME, NUM_ENVELOPES, PATTERN_BEATS, Pattern, WAVEFORM_SAMPLES, empty_pattern,
 };
 
 pub const MAX_PATTERNS: usize = u8::MAX as usize;
 pub const NUM_INSTRUMENTS: usize = 8;
-pub const SCHEMA_VERSION: u8 = 1;
+pub const SCHEMA_VERSION: u8 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InstrumentData {
@@ -65,7 +65,12 @@ where
     use serde::ser::SerializeSeq;
     let mut seq = serializer.serialize_seq(Some(patterns.len()))?;
     for pattern in patterns {
-        let as_vecs: Vec<Vec<Beat>> = pattern.iter().map(|row| row.to_vec()).collect();
+        let used = pattern
+            .iter()
+            .filter_map(|lane| lane.iter().rposition(|beat| !beat.is_empty()))
+            .max()
+            .map_or(1, |last| last + 1);
+        let as_vecs: Vec<Vec<Beat>> = pattern.iter().map(|lane| lane[..used].to_vec()).collect();
         seq.serialize_element(&as_vecs)?;
     }
     seq.end()
@@ -87,9 +92,9 @@ where
         }
         let mut pattern: Pattern = empty_pattern();
         for (ch_idx, channel) in pattern_vec.iter().enumerate() {
-            if channel.len() != PATTERN_BEATS {
+            if channel.len() > PATTERN_BEATS {
                 return Err(D::Error::custom(format!(
-                    "Expected {} beats in channel {}, got {}",
+                    "Expected at most {} beats in channel {}, got {}",
                     PATTERN_BEATS,
                     ch_idx,
                     channel.len()
@@ -224,7 +229,7 @@ pub fn default_tuning() -> TuningData {
 }
 
 fn default_pattern_beats() -> Vec<u8> {
-    vec![PATTERN_BEATS as u8]
+    vec![DEFAULT_PATTERN_BEATS as u8]
 }
 
 /// `steps` values running from `from` to `to` inclusive.
@@ -366,7 +371,7 @@ impl TrackerFile {
             tuning: default_tuning(),
             envelopes: default_envelopes(),
             patterns: vec![empty_pattern()],
-            pattern_beats: vec![PATTERN_BEATS as u8],
+            pattern_beats: vec![DEFAULT_PATTERN_BEATS as u8],
             bpm: 120,
             fx_speed: 6,
         }
@@ -387,7 +392,7 @@ impl TrackerFile {
             self.patterns.push(empty_pattern());
         }
         while idx >= self.pattern_beats.len() {
-            self.pattern_beats.push(PATTERN_BEATS as u8);
+            self.pattern_beats.push(DEFAULT_PATTERN_BEATS as u8);
         }
         &mut self.patterns[idx]
     }
@@ -397,13 +402,13 @@ impl TrackerFile {
         self.pattern_beats
             .get(idx)
             .copied()
-            .unwrap_or(PATTERN_BEATS as u8)
+            .unwrap_or(DEFAULT_PATTERN_BEATS as u8)
     }
 
     pub fn set_beats_for(&mut self, pattern_idx: u8, beats: u8) {
         let idx = pattern_idx as usize;
         while idx >= self.pattern_beats.len() {
-            self.pattern_beats.push(PATTERN_BEATS as u8);
+            self.pattern_beats.push(DEFAULT_PATTERN_BEATS as u8);
         }
         self.pattern_beats[idx] = beats.clamp(1, PATTERN_BEATS as u8);
     }
@@ -492,7 +497,7 @@ impl TrackerFile {
         file.bpm = file.bpm.clamp(1, MAX_TEMPO);
         file.fx_speed = file.fx_speed.clamp(1, MAX_FX_SPEED);
         while file.pattern_beats.len() < file.patterns.len() {
-            file.pattern_beats.push(PATTERN_BEATS as u8);
+            file.pattern_beats.push(DEFAULT_PATTERN_BEATS as u8);
         }
         file.pattern_beats.truncate(file.patterns.len().max(1));
         Ok(file)

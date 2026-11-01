@@ -15,6 +15,8 @@ const CHANNELS: usize = 7;
 
 const TRACK_HEADER_SIZE: usize = 6;
 
+pub const TRACK_BANK_SIZE: usize = 16384;
+
 // Frequency table slot 0 is reserved: a note index of 0 means "no note here".
 const FREQ_INDEX_NONE: u8 = 0;
 const MAX_FREQ_ENTRIES: usize = u8::MAX as usize;
@@ -335,7 +337,18 @@ fn serialize_pattern(pattern: &BakedPattern, freqs: &mut FreqTable) -> io::Resul
     Ok(out)
 }
 
-fn build_track_bin(bpm: u16, fx_speed: u8, baked: &[BakedPattern]) -> io::Result<Vec<u8>> {
+pub struct TrackBin {
+    pub bytes: Vec<u8>,
+    pub pattern_sizes: Vec<usize>,
+}
+
+impl TrackBin {
+    pub fn fits_bank(&self) -> bool {
+        self.bytes.len() <= TRACK_BANK_SIZE
+    }
+}
+
+fn build_track_bin(bpm: u16, fx_speed: u8, baked: &[BakedPattern]) -> io::Result<TrackBin> {
     let pattern_count = baked.len();
     let pattern_count_byte = u8::try_from(pattern_count).map_err(|_| {
         io::Error::new(
@@ -353,13 +366,7 @@ fn build_track_bin(bpm: u16, fx_speed: u8, baked: &[BakedPattern]) -> io::Result
     let mut running = TRACK_HEADER_SIZE + pattern_count * 2 + freqs.entries.len() * 2;
     let mut pattern_offsets = Vec::with_capacity(pattern_count);
     for block in &blocks {
-        let offset = u16::try_from(running).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("track exceeds the {} bytes 16-bit pattern offsets can address", u16::MAX),
-            )
-        })?;
-        pattern_offsets.push(offset);
+        pattern_offsets.push(u16::try_from(running).unwrap_or(u16::MAX));
         running += block.len();
     }
 
@@ -377,7 +384,24 @@ fn build_track_bin(bpm: u16, fx_speed: u8, baked: &[BakedPattern]) -> io::Result
     for block in &blocks {
         out.extend_from_slice(block);
     }
-    Ok(out)
+    Ok(TrackBin {
+        bytes: out,
+        pattern_sizes: blocks.iter().map(Vec::len).collect(),
+    })
+}
+
+pub fn build_track(file: &TrackerFile) -> io::Result<TrackBin> {
+    let baked: Vec<BakedPattern> = (0..file.patterns.len())
+        .map(|i| {
+            bake_pattern(
+                file,
+                i,
+                file.beats_for(i as u8) as usize,
+                sample_rate_reg_to_hz(SAMPLE_RATE_REG),
+            )
+        })
+        .collect();
+    build_track_bin(file.bpm, file.fx_speed, &baked)
 }
 
 /// Serialize one envelope: step count, the accumulator threshold that spreads
@@ -397,20 +421,17 @@ fn build_envelope_bin(steps: &[u8]) -> Vec<u8> {
 }
 
 pub fn export_all(file: &TrackerFile, stem: &str, export_dir: &Path) -> io::Result<()> {
-    let baked: Vec<BakedPattern> = (0..file.patterns.len())
-        .map(|i| {
-            bake_pattern(
-                file,
-                i,
-                file.beats_for(i as u8) as usize,
-                sample_rate_reg_to_hz(SAMPLE_RATE_REG),
-            )
-        })
-        .collect();
-
-    // Built before anything is written so a track that overflows the frequency
-    // table doesn't leave a half-finished export behind.
-    let track_bin = build_track_bin(file.bpm, file.fx_speed, &baked)?;
+    let track_bin = build_track(file)?;
+    if !track_bin.fits_bank() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "track is {} bytes; a ROM bank holds {}",
+                track_bin.bytes.len(),
+                TRACK_BANK_SIZE
+            ),
+        ));
+    }
 
     std::fs::create_dir_all(export_dir)?;
     let instruments_dir = export_dir.join("instruments");
@@ -430,7 +451,7 @@ pub fn export_all(file: &TrackerFile, stem: &str, export_dir: &Path) -> io::Resu
     }
     std::fs::write(envelopes_dir.join("volume_scale.bin"), scale_table())?;
 
-    std::fs::write(export_dir.join(format!("{}.bin", stem)), track_bin)?;
+    std::fs::write(export_dir.join(format!("{}.bin", stem)), track_bin.bytes)?;
 
     Ok(())
 }

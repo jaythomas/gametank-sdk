@@ -10,7 +10,9 @@ use gte_w65c02s::W65C02S;
 use indexmap::IndexMap;
 
 use crate::file::NUM_INSTRUMENTS;
-use crate::tracker::{MAX_VOLUME, NUM_ENVELOPES, PATTERN_BEATS, VOLUME_LEVELS, envelope_slot};
+use crate::tracker::{
+    DEFAULT_PATTERN_BEATS, MAX_VOLUME, NUM_ENVELOPES, PATTERN_BEATS, VOLUME_LEVELS, envelope_slot,
+};
 use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
 use crate::volume_scale::{SCALE_STRIDE, scale_table};
 
@@ -180,7 +182,7 @@ impl PlayerInner {
             current_buffer: None,
             buffer_position: 0,
             patterns: vec![empty_pattern()],
-            pattern_beats_list: vec![PATTERN_BEATS as u8],
+            pattern_beats_list: vec![DEFAULT_PATTERN_BEATS as u8],
             current_pattern_idx: 0,
             flow_count: 0,
             tuning_notes: IndexMap::new(),
@@ -227,7 +229,7 @@ impl PlayerInner {
         self.pattern_beats_list
             .get(pattern_idx)
             .copied()
-            .unwrap_or(PATTERN_BEATS as u8)
+            .unwrap_or(DEFAULT_PATTERN_BEATS as u8)
             .clamp(1, PATTERN_BEATS as u8) as usize
     }
 

@@ -63,8 +63,9 @@ fn parse_command(input: &str) -> Vec<ComponentAction> {
     }
     let action = match (name, arg) {
         ("d" | "delete", _) => parse_row_count(arg).map(ComponentAction::DeleteBeats),
+        ("double", None) => Some(ComponentAction::DoubleBeats),
         ("envelope", None) => Some(ComponentAction::OpenEnvelopeEditor(0)),
-        ("exp" | "export", None) => Some(ComponentAction::Export),
+        ("exp" | "export", None) => Some(ComponentAction::ExportDirect),
         ("instrument", None) => Some(ComponentAction::OpenInstrumentEditor(0)),
         ("m", None) => Some(ComponentAction::ToggleMuteChannel),
         ("mute", None) => Some(ComponentAction::MuteChannel),

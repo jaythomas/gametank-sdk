@@ -19,9 +19,9 @@ use crate::{
     lane::{Lane, LaneKind},
     scheme::SCHEME,
     tracker::{
-        Beat, ChannelCmd, FX_ID_ARPEGGIO, FX_ID_ENVELOPE, FX_ID_INSTRUMENT, FX_ID_PITCH_DOWN,
-        FX_ID_PITCH_UP, MAX_FX_ID, MAX_FX_SPEED, MAX_INSTRUMENT_INDEX, MAX_TEMPO, MAX_VOLUME,
-        PATTERN_BEATS, Pattern, SequencerCmd,
+        Beat, ChannelCmd, DEFAULT_PATTERN_BEATS, FX_ID_ARPEGGIO, FX_ID_ENVELOPE,
+        FX_ID_INSTRUMENT, FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, MAX_FX_ID, MAX_FX_SPEED,
+        MAX_INSTRUMENT_INDEX, MAX_TEMPO, MAX_VOLUME, Pattern, SequencerCmd,
     },
     validation::ValidationError,
 };
@@ -222,7 +222,7 @@ impl PatternEditor {
             view_layout: ViewLayout::default(),
             playing: false,
             pattern_idx: 0,
-            beats: PATTERN_BEATS as u8,
+            beats: DEFAULT_PATTERN_BEATS as u8,
             lanes: vec![
                 Lane::beat(),
                 Lane::seq(),
@@ -547,7 +547,7 @@ impl Component for PatternEditor {
                 }
                 KeyCode::PageDown => {
                     let step = (self.view_layout.page_h / 2).max(1) as u8;
-                    self.sel_y = (self.sel_y + step).min(self.beats.saturating_sub(1));
+                    self.sel_y = self.sel_y.saturating_add(step).min(self.beats.saturating_sub(1));
                     self.edit = EditState::Idle;
                 }
                 _ => {}

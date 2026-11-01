@@ -12,7 +12,10 @@ use crate::{
     components::{ControlDeck, pattern_editor::PatternEditor},
     file::{TrackerFile, TuningData},
     scheme::SCHEME,
-    tracker::{BeatRow, PATTERN_TABLE_WIDTH, delete_rows, paste_rows, yank_rows},
+    tracker::{
+        BeatRow, PATTERN_TABLE_WIDTH, delete_rows, double_rows, paste_rows, remap_jump_targets,
+        row_after_doubling, yank_rows,
+    },
     validation::ValidationError,
 };
 
@@ -100,6 +103,20 @@ impl TrackerContainer {
         file.set_beats_for(idx, new_beats);
         self.pattern_editor.end_cell_edit();
         Some(removed)
+    }
+
+    pub fn double_beats(&mut self, file: &mut TrackerFile) {
+        let idx = self.pattern_idx();
+        let beats = file.beats_for(idx);
+        let Some(new_beats) = double_rows(file.current_pattern_mut(idx), beats) else {
+            return;
+        };
+        file.set_beats_for(idx, new_beats);
+        remap_jump_targets(&mut file.patterns, idx, |target| {
+            if target < beats { row_after_doubling(beats, target) } else { target }
+        });
+        self.set_current_row(row_after_doubling(beats, self.current_row()));
+        self.pattern_editor.end_cell_edit();
     }
 
     /// Copies `count` rows from the selected row.

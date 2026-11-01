@@ -17,6 +17,8 @@ A music editor/tracker for the [GameTank](https://gametank.zone/).
 - [Envelope editor](#envelope-editor)
 - [Tuning editor](#tuning-editor)
 - [Using your tracks](#using-your-tracks)
+- [Tips and tricks](#tips-and-tricks)
+  - [Percussion](#percussion)
 - [Track descriptor reference](#track-descriptor-reference)
 - [Envelope reference](#envelope-reference)
 
@@ -125,7 +127,7 @@ The control deck allows you to edit global track parameters, pattern-level param
 
 **Quit** will prompt to save changes before exiting so that you don't accidentally close the program with unsaved changes.
 
-**Export** saves the track, instruments, and tuning into a format consumable by the project. See [Using your tracks](#using-your-tracks) below.
+**Export** saves the track, instruments, and envelopes into a format consumable by the project. See [Using your tracks](#using-your-tracks) below.
 
 
 ## Command palette
@@ -137,12 +139,13 @@ Press Enter to execute or Esc to cancel the command input.
 | command          | hotkey            | description                                                |
 | -------          | ------            | -----------                                                |
 | `:d`/`:delete N` | `Ctrl+d`/`Ctrl+x` | cut the selected beat to the tracker's clipboard, or N beats in hex, e.g. `:d f` |
+| `:double`        |                   | insert an empty beat after every beat, useful for a pattern that needs double time resolution |
 | `:envelope`      |                   | open envelope editor                                       |
 | `:exp`/`:export` |                   | export track                                               |
 | `:instrument`    |                   | open instrument editor                                     |
 | `:m`             | `Ctrl+m`          | toggle mute on the active voice channel                    |
 | `:mute`/`:unmute`|                   | mute/unmute the active voice channel                       |
-| `:p`/`:paste`    | `Ctrl+p`          | insert clipboard contents below the selected row           |
+| `:p`/`:paste`    | `Ctrl+p`/`Ctrl+v` | insert clipboard contents below the selected row           |
 | `:P`/`:Paste`    | `Ctrl+Shift+p`    | insert clipboard contents above the selected row           |
 | `:play`          | `Space`           | toggle playback from the selected row                      |
 | `:pn N`          | `Ctrl+PageDown`   | go to the next pattern, or N/-N patterns forward/back      |
@@ -217,7 +220,11 @@ Just click `[Cancel]` or `[Save]` when done.
 
 ## Using your tracks
 
-Clicking **Export** creates a `<name>-export/` folder next to your gt-tracker file:
+Clicking **Export** shows a modal with track information and allows you to creates a `<track-name>-export/` folder next to your gt-tracker file.
+
+![gt-tracker export modal showing track size](./screenshot4.png)
+
+Once exported, you'll see the following content in the folder:
 
 ```
 mycooltrack-export/
@@ -232,9 +239,19 @@ Follow the instructions for your SDK on how to incorporate the track data into y
 - [Rust SDK](https://github.com/dwbrite/gametank-sdk) - already integrated (see README)
 
 
+## Tips and tricks
+
+### Percussion
+
+The noise samples are meant to be played back at the lowest octaves.
+Otherwise, if you play them back at higher frequencies, [noises become notes to your ears](https://www.youtube.com/shorts/9Jua53-w4U4).
+Even at lower frequencies though, noises need an envelope to exhibit percussive behavior.
+Try experimenting with a fast attack and fast decay with the default noise samples.
+You'll find the two included noise samples exhibit different brightnesses and can play off each other, like a snare and a tom.
+
 ## Track descriptor reference
 
-The exported `<name>-export/<name>.bin` is made of four parts. Every pattern keeps
+The exported `<track-name>-export/<track-name>.bin` is made of four parts. Every pattern keeps
 its arrays dense so the sequencer can index straight to a beat without scanning,
 but arrays a pattern never uses are omitted entirely.
 

@@ -268,6 +268,11 @@ impl PatternEditor {
         file.current_pattern_mut(self.pattern_idx)
     }
 
+    pub fn clamp_selection(&mut self, file: &TrackerFile) {
+        self.beats = file.beats_for(self.pattern_idx);
+        self.sel_y = self.sel_y.min(self.beats.saturating_sub(1));
+    }
+
     pub fn set_tuning(&mut self, _tuning: TuningData) {}
 
     pub fn set_transpose(&mut self, transpose: i32) {
@@ -502,8 +507,7 @@ impl CellDisplay {
 
 impl Component for PatternEditor {
     fn update(&mut self, events: Vec<Event>, file: &mut TrackerFile) -> Vec<ComponentAction> {
-        self.beats = file.beats_for(self.pattern_idx);
-        self.sel_y = self.sel_y.min(self.beats.saturating_sub(1));
+        self.clamp_selection(file);
         self.edited = false;
         if self.playing {
             return Vec::new();

@@ -13,8 +13,9 @@ use crate::{
     file::{TrackerFile, TuningData},
     scheme::SCHEME,
     tracker::{
-        BeatRow, PATTERN_TABLE_WIDTH, delete_rows, double_rows, paste_rows, remap_jump_targets,
-        row_after_doubling, yank_rows,
+        BeatRow, PATTERN_TABLE_WIDTH, VoiceBeat, clear_voice_rows, delete_rows, paste_rows,
+        paste_voice_rows, remap_jump_targets, row_after_spreading, spread_rows, yank_rows,
+        yank_voice_rows,
     },
     validation::ValidationError,
 };
@@ -64,6 +65,10 @@ impl TrackerContainer {
         self.pattern_editor.sel_y = 0;
     }
 
+    pub fn clamp_selection(&mut self, file: &TrackerFile) {
+        self.pattern_editor.clamp_selection(file);
+    }
+
     pub fn set_playing(&mut self, playing: bool) {
         self.control_deck.playing = playing;
         self.pattern_editor.playing = playing;
@@ -105,17 +110,17 @@ impl TrackerContainer {
         Some(removed)
     }
 
-    pub fn double_beats(&mut self, file: &mut TrackerFile) {
+    pub fn spread_beats(&mut self, file: &mut TrackerFile, factor: u8) {
         let idx = self.pattern_idx();
         let beats = file.beats_for(idx);
-        let Some(new_beats) = double_rows(file.current_pattern_mut(idx), beats) else {
+        let Some(new_beats) = spread_rows(file.current_pattern_mut(idx), beats, factor) else {
             return;
         };
         file.set_beats_for(idx, new_beats);
         remap_jump_targets(&mut file.patterns, idx, |target| {
-            if target < beats { row_after_doubling(beats, target) } else { target }
+            if target < beats { row_after_spreading(beats, target, factor) } else { target }
         });
-        self.set_current_row(row_after_doubling(beats, self.current_row()));
+        self.set_current_row(row_after_spreading(beats, self.current_row(), factor));
         self.pattern_editor.end_cell_edit();
     }
 
@@ -123,6 +128,40 @@ impl TrackerContainer {
     pub fn yank_beats(&self, file: &TrackerFile, count: usize) -> Option<Vec<BeatRow>> {
         let idx = self.pattern_idx();
         yank_rows(file.current_pattern(idx), file.beats_for(idx), self.current_row(), count)
+    }
+
+    pub fn yank_voice_beats(&self, file: &TrackerFile, count: usize) -> Option<Vec<VoiceBeat>> {
+        let ch = self.active_channel()?;
+        let idx = self.pattern_idx();
+        yank_voice_rows(
+            file.current_pattern(idx),
+            file.beats_for(idx),
+            ch,
+            self.current_row(),
+            count,
+        )
+    }
+
+    pub fn delete_voice_beats(
+        &mut self,
+        file: &mut TrackerFile,
+        count: usize,
+    ) -> Option<Vec<VoiceBeat>> {
+        let rows = self.yank_voice_beats(file, count)?;
+        let ch = self.active_channel()?;
+        let idx = self.pattern_idx();
+        let beats = file.beats_for(idx);
+        clear_voice_rows(file.current_pattern_mut(idx), beats, ch, self.current_row(), count);
+        self.pattern_editor.end_cell_edit();
+        Some(rows)
+    }
+
+    pub fn paste_voice_beats(&mut self, file: &mut TrackerFile, clip: &[VoiceBeat]) {
+        let Some(ch) = self.active_channel() else { return };
+        let idx = self.pattern_idx();
+        let beats = file.beats_for(idx);
+        paste_voice_rows(file.current_pattern_mut(idx), beats, ch, self.current_row(), clip);
+        self.pattern_editor.end_cell_edit();
     }
 
     /// Inserts `clip` above or below the selected row.

@@ -64,6 +64,7 @@ fn parse_command(input: &str) -> Vec<ComponentAction> {
     let action = match (name, arg) {
         ("d" | "delete", _) => parse_row_count(arg).map(ComponentAction::DeleteBeats),
         ("double", None) => Some(ComponentAction::DoubleBeats),
+        ("dv" | "deletev", _) => parse_row_count(arg).map(ComponentAction::DeleteVoiceBeats),
         ("envelope", None) => Some(ComponentAction::OpenEnvelopeEditor(0)),
         ("exp" | "export", None) => Some(ComponentAction::ExportDirect),
         ("instrument", None) => Some(ComponentAction::OpenInstrumentEditor(0)),
@@ -75,12 +76,17 @@ fn parse_command(input: &str) -> Vec<ComponentAction> {
         ("pn", None) => Some(ComponentAction::PatternNext),
         ("pn", Some(arg)) => parse_pattern_offset(arg).map(ComponentAction::PatternGoTo),
         ("pp", None) => Some(ComponentAction::PatternPrev),
+        ("pv" | "pastev", None) => Some(ComponentAction::PasteVoiceBeats),
         ("q" | "quit", None) => Some(ComponentAction::Quit),
         ("s" | "solo", None) => Some(ComponentAction::SoloChannel),
+        ("triple", None) => Some(ComponentAction::TripleBeats),
         ("unmute", None) => Some(ComponentAction::UnmuteChannel),
         ("w" | "write", None) => Some(ComponentAction::SaveFile),
         ("wq" | "write-quit", None) => Some(ComponentAction::SaveAndQuit),
         ("y" | "yank", _) => parse_row_count(arg).map(ComponentAction::YankBeats),
+        ("yv" | "yankv" | "yankovic" | "weirdal", _) => {
+            parse_row_count(arg).map(ComponentAction::YankVoiceBeats)
+        }
         _ => None,
     };
     action.into_iter().collect()

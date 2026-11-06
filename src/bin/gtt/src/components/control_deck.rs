@@ -308,7 +308,7 @@ pub struct ControlDeck {
     pattern_zap_btn: ButtonState,
     pattern_idx: u8,
     pattern_count: usize,
-    pattern_edited: bool,
+    pattern_resized: bool,
     validation_errors: Vec<ValidationError>,
 }
 
@@ -353,7 +353,7 @@ impl ControlDeck {
             pattern_zap_btn: ButtonState::new(),
             pattern_idx: 0,
             pattern_count: 1,
-            pattern_edited: false,
+            pattern_resized: false,
             save_feedback_until: None,
             export_feedback_until: None,
             validation_errors: Vec::new(),
@@ -434,8 +434,8 @@ impl ControlDeck {
     }
 
     fn take_edit_actions(&mut self) -> Vec<ComponentAction> {
-        if std::mem::take(&mut self.pattern_edited) {
-            vec![ComponentAction::PatternEdited]
+        if std::mem::take(&mut self.pattern_resized) {
+            vec![ComponentAction::PatternResized]
         } else {
             Vec::new()
         }
@@ -653,7 +653,7 @@ impl ControlDeck {
             Row::FxSpeed => file.fx_speed = value as u8,
             Row::Beats if file.beats_for(self.pattern_idx) != value as u8 => {
                 file.set_beats_for(self.pattern_idx, value as u8);
-                self.pattern_edited = true;
+                self.pattern_resized = true;
             }
             _ => {}
         }

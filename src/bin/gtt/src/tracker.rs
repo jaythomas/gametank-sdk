@@ -156,13 +156,94 @@ pub fn paste_rows(pattern: &mut Pattern, beats: u8, at: u8, clip: &[BeatRow]) ->
     Some((beats + n) as u8)
 }
 
-pub fn row_after_doubling(beats: u8, row: u8) -> u8 {
-    let spaced = beats.min(PATTERN_BEATS as u8 - beats);
-    if row < spaced { row * 2 } else { row + spaced }
+/// The note, volume, and channel Fx cells of one voice on one row.
+#[derive(Debug, Default, Clone)]
+pub struct VoiceBeat {
+    note: Option<ChannelCmd>,
+    vol: Option<ChannelCmd>,
+    fx: Option<ChannelCmd>,
 }
 
-pub fn double_rows(pattern: &mut Pattern, beats: u8) -> Option<u8> {
-    let new_beats = beats + beats.min(PATTERN_BEATS as u8 - beats);
+fn is_note_cmd(cmd: &ChannelCmd) -> bool {
+    matches!(cmd, ChannelCmd::Note(_) | ChannelCmd::NoteOff)
+}
+
+fn is_vol_cmd(cmd: &ChannelCmd) -> bool {
+    matches!(cmd, ChannelCmd::Volume(_))
+}
+
+fn is_fx_cmd(cmd: &ChannelCmd) -> bool {
+    matches!(
+        cmd,
+        ChannelCmd::Instrument(_)
+            | ChannelCmd::Arpeggio(_, _)
+            | ChannelCmd::PitchUp(_)
+            | ChannelCmd::PitchDown(_)
+            | ChannelCmd::Envelope(_)
+    )
+}
+
+fn is_voice_cmd(cmd: &ChannelCmd) -> bool {
+    is_note_cmd(cmd) || is_vol_cmd(cmd) || is_fx_cmd(cmd)
+}
+
+fn voice_beat_of(beat: &Beat) -> VoiceBeat {
+    let find = |pred: fn(&ChannelCmd) -> bool| beat.cmd_list.iter().find(|c| pred(c)).cloned();
+    VoiceBeat { note: find(is_note_cmd), vol: find(is_vol_cmd), fx: find(is_fx_cmd) }
+}
+
+pub fn yank_voice_rows(
+    pattern: &Pattern,
+    beats: u8,
+    ch: usize,
+    start: u8,
+    count: usize,
+) -> Option<Vec<VoiceBeat>> {
+    let (start, beats) = (start as usize, beats as usize);
+    if count == 0 || start + count > beats {
+        return None;
+    }
+    Some(pattern[ch + 1][start..start + count].iter().map(voice_beat_of).collect())
+}
+
+pub fn clear_voice_rows(pattern: &mut Pattern, beats: u8, ch: usize, start: u8, count: usize) {
+    let (start, beats) = (start as usize, beats as usize);
+    let end = (start + count).min(beats);
+    for beat in &mut pattern[ch + 1][start.min(end)..end] {
+        beat.cmd_list.retain(|c| !is_voice_cmd(c));
+    }
+}
+
+pub fn paste_voice_rows(
+    pattern: &mut Pattern,
+    beats: u8,
+    ch: usize,
+    start: u8,
+    clip: &[VoiceBeat],
+) {
+    let start = start as usize;
+    let n = clip.len().min((beats as usize).saturating_sub(start));
+    for (beat, voice) in pattern[ch + 1][start..start + n].iter_mut().zip(clip) {
+        beat.cmd_list.retain(|c| !is_voice_cmd(c));
+        beat.cmd_list.extend([&voice.note, &voice.vol, &voice.fx].into_iter().flatten().cloned());
+    }
+}
+
+// Number of leading rows that get spread out when every row is followed by
+// (factor - 1) empty rows; the remaining rows only shift down to stay in bounds.
+fn spread_count(beats: u8, factor: u8) -> u8 {
+    beats.min((PATTERN_BEATS as u8 - beats) / (factor - 1))
+}
+
+pub fn row_after_spreading(beats: u8, row: u8, factor: u8) -> u8 {
+    let spread = spread_count(beats, factor);
+    if row < spread { row * factor } else { row + spread * (factor - 1) }
+}
+
+// Inserts (factor - 1) empty rows after every row, as many as fit in the
+// pattern. Returns the new pattern length, or None if nothing changed.
+pub fn spread_rows(pattern: &mut Pattern, beats: u8, factor: u8) -> Option<u8> {
+    let new_beats = beats + spread_count(beats, factor) * (factor - 1);
     if new_beats == beats {
         return None;
     }
@@ -171,7 +252,7 @@ pub fn double_rows(pattern: &mut Pattern, beats: u8) -> Option<u8> {
             *beat = Beat::default();
         }
         for row in (1..beats).rev() {
-            lane[row_after_doubling(beats, row) as usize] =
+            lane[row_after_spreading(beats, row, factor) as usize] =
                 std::mem::take(&mut lane[row as usize]);
         }
     }

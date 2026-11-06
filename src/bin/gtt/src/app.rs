@@ -24,7 +24,7 @@ use crate::{
     export,
     file::{MAX_PATTERNS, NUM_INSTRUMENTS, TrackerFile},
     player::Player,
-    tracker::{BeatRow, DEFAULT_PATTERN_BEATS, NUM_ENVELOPES},
+    tracker::{BeatRow, DEFAULT_PATTERN_BEATS, NUM_ENVELOPES, VoiceBeat},
     validation::{ValidationError, validate_track},
 };
 
@@ -49,6 +49,7 @@ pub struct App {
     file_data: TrackerFile,
     config: GttConfig,
     beat_clipboard: Vec<BeatRow>,
+    voice_clipboard: Vec<VoiceBeat>,
     command_palette: CommandPalette,
     instrument_editor: InstrumentEditor,
     envelope_editor: EnvelopeEditor,
@@ -98,6 +99,7 @@ impl App {
             file_data,
             config,
             beat_clipboard: Vec::new(),
+            voice_clipboard: Vec::new(),
             command_palette: CommandPalette::init(),
             instrument_editor: InstrumentEditor::init(),
             envelope_editor: EnvelopeEditor::init(),
@@ -311,8 +313,15 @@ impl App {
                         self.beat_clipboard = rows;
                     }
                 }
+                ComponentAction::DeleteVoiceBeats(count) => {
+                    if let Some(rows) =
+                        self.tracker_container.delete_voice_beats(&mut self.file_data, count)
+                    {
+                        self.voice_clipboard = rows;
+                    }
+                }
                 ComponentAction::DoubleBeats => {
-                    self.tracker_container.double_beats(&mut self.file_data);
+                    self.tracker_container.spread_beats(&mut self.file_data, 2);
                 }
                 ComponentAction::Export => self.open_export_modal(false),
                 ComponentAction::ExportDirect => {
@@ -404,6 +413,10 @@ impl App {
                         matches!(action, ComponentAction::PasteBelow),
                     );
                 }
+                ComponentAction::PasteVoiceBeats => {
+                    self.tracker_container
+                        .paste_voice_beats(&mut self.file_data, &self.voice_clipboard);
+                }
                 ComponentAction::PatternCopy => {
                     if self.file_data.patterns.len() >= MAX_PATTERNS {
                         continue;
@@ -449,6 +462,9 @@ impl App {
                 }
                 ComponentAction::PatternNext => self.go_to_pattern(1),
                 ComponentAction::PatternPrev => self.go_to_pattern(-1),
+                ComponentAction::PatternResized => {
+                    self.tracker_container.clamp_selection(&self.file_data);
+                }
                 ComponentAction::PatternZap => {
                     let idx = self.tracker_container.pattern_idx();
                     *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
@@ -499,6 +515,9 @@ impl App {
                         }
                     }
                 }
+                ComponentAction::TripleBeats => {
+                    self.tracker_container.spread_beats(&mut self.file_data, 3);
+                }
                 ComponentAction::TuningSaved(tuning) => {
                     self.file_data.tuning = tuning.clone();
                     self.tracker_container.apply_tuning(&tuning);
@@ -532,6 +551,13 @@ impl App {
                         self.beat_clipboard = rows;
                     }
                 }
+                ComponentAction::YankVoiceBeats(count) => {
+                    if let Some(rows) =
+                        self.tracker_container.yank_voice_beats(&self.file_data, count)
+                    {
+                        self.voice_clipboard = rows;
+                    }
+                }
             }
             if edits_track {
                 self.revalidate();
@@ -552,16 +578,20 @@ fn edits_track(action: &ComponentAction) -> bool {
         action,
         ComponentAction::CreateNewFile(_)
             | ComponentAction::DeleteBeats(_)
+            | ComponentAction::DeleteVoiceBeats(_)
             | ComponentAction::DoubleBeats
             | ComponentAction::OpenFile(_)
             | ComponentAction::OpenPatternDeleteConfirm
             | ComponentAction::PasteAbove
             | ComponentAction::PasteBelow
+            | ComponentAction::PasteVoiceBeats
             | ComponentAction::PatternCopy
             | ComponentAction::PatternDelete
             | ComponentAction::PatternEdited
             | ComponentAction::PatternNew
+            | ComponentAction::PatternResized
             | ComponentAction::PatternZap
+            | ComponentAction::TripleBeats
     )
 }
 
@@ -582,12 +612,15 @@ fn hotkey_action(key: &KeyEvent) -> Option<ComponentAction> {
         _ => return None,
     };
     match c.to_ascii_lowercase() {
-        'c' | 'y' => Some(ComponentAction::YankBeats(1)),
-        'd' | 'x' => Some(ComponentAction::DeleteBeats(1)),
+        'c' => Some(ComponentAction::YankVoiceBeats(1)),
+        'd' => Some(ComponentAction::DeleteBeats(1)),
         'm' => Some(ComponentAction::ToggleMuteChannel),
         'p' if key.modifiers.contains(KeyModifiers::SHIFT) => Some(ComponentAction::PasteAbove),
-        'p' | 'v' => Some(ComponentAction::PasteBelow),
+        'p' => Some(ComponentAction::PasteBelow),
         's' => Some(ComponentAction::SoloChannel),
+        'v' => Some(ComponentAction::PasteVoiceBeats),
+        'x' => Some(ComponentAction::DeleteVoiceBeats(1)),
+        'y' => Some(ComponentAction::YankBeats(1)),
         _ => None,
     }
 }

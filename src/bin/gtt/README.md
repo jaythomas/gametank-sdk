@@ -136,24 +136,28 @@ This provides quick keyboard-driven actions. All the commands available on the c
 When you start typing `:` your command input will start appearing at the very bottom of the screen.
 Press Enter to execute or Esc to cancel the command input.
 
-| command          | hotkey            | description                                                |
-| -------          | ------            | -----------                                                |
-| `:d`/`:delete N` | `Ctrl+d`/`Ctrl+x` | cut the selected beat to the tracker's clipboard, or N beats in hex, e.g. `:d f` |
-| `:double`        |                   | insert an empty beat after every beat, useful for a pattern that needs double time resolution |
-| `:envelope`      |                   | open envelope editor                                       |
-| `:exp`/`:export` |                   | export track                                               |
-| `:instrument`    |                   | open instrument editor                                     |
-| `:m`             | `Ctrl+m`          | toggle mute on the active voice channel                    |
-| `:mute`/`:unmute`|                   | mute/unmute the active voice channel                       |
-| `:p`/`:paste`    | `Ctrl+p`/`Ctrl+v` | insert clipboard contents below the selected row           |
-| `:P`/`:Paste`    | `Ctrl+Shift+p`    | insert clipboard contents above the selected row           |
-| `:play`          | `Space`           | toggle playback from the selected row                      |
-| `:pn N`          | `Ctrl+PageDown`   | go to the next pattern, or N/-N patterns forward/back      |
-| `:pp`            | `Ctrl+PageUp`     | go to the previous pattern                                 |
-| `:q`/`:quit`     |                   | quit the application                                       |
-| `:s`/`:solo`     | `Ctrl+s`          | mutes all other channels, or unmutes all if already soloed |
-| `:w`/`:write`    |                   | save changes to file                                       |
-| `:y`/`:yank N`   | `Ctrl+c`/`Ctrl+y` | copy the selected beat, or N rows in hex                   |
+| command          | hotkey          | description                                                       |
+| -------          | ------          | -----------                                                       |
+| `:d`/`:delete N` | `Ctrl+d`        | cut the selected beat to the tracker's clipboard, or N beats in hex, e.g. `:d f` |
+| `:double`        |                 | insert an empty beat after every beat, useful for a pattern that needs double time resolution |
+| `:dv`/`:deletev N` | `Ctrl+x`      | cut the selected voice's note, volume, and effect to clipboard    |
+| `:envelope`      |                 | open envelope editor                                              |
+| `:exp`/`:export` |                 | export track                                                      |
+| `:instrument`    |                 | open instrument editor                                            |
+| `:m`             | `Ctrl+m`        | toggle mute on the active voice channel                           |
+| `:mute`/`:unmute`|                 | mute/unmute the active voice channel                              |
+| `:p`/`:paste`    | `Ctrl+p`        | insert clipboard contents below the selected row                  |
+| `:P`/`:Paste`    | `Ctrl+Shift+p`  | insert clipboard contents above the selected row                  |
+| `:play`          | `Space`         | toggle playback from the selected row                             |
+| `:pn N`          | `Ctrl+PageDown` | go to the next pattern, or N/-N patterns forward/back             |
+| `:pp`            | `Ctrl+PageUp`   | go to the previous pattern                                        |
+| `:pv`/`:pastev`  | `Ctrl+v`        | paste clipboard over the selected voice(s)                        |
+| `:q`/`:quit`     |                 | quit the application                                              |
+| `:s`/`:solo`     | `Ctrl+s`        | mutes all other channels, or unmutes all if already soloed        |
+| `:triple`        |                 | like double, but inserts two empty beats after every beat         |
+| `:w`/`:write`    |                 | save changes to file                                              |
+| `:y`/`:yank N`   | `Ctrl+y`        | copy the selected beat, or N rows in hex                          |
+| `:yv`/`:yankv`   | `Ctrl+c`        | copy the selected voice's note, volume, and effect to a clipboard |
 
 ## Instrument editor
 

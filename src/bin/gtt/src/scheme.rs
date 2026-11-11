@@ -70,7 +70,11 @@ impl Scheme {
         match color {
             Color::Rgb(r, g, b) => {
                 let grey = r as f32 * 0.3 + g as f32 * 0.59 + b as f32 * 0.11;
-                if grey < 105.0 { self.white[3] } else { self.black[0] }
+                if grey < 105.0 {
+                    self.white[3]
+                } else {
+                    self.black[0]
+                }
             }
             Color::Reset => Color::Reset,
             _ => self.white[3],

@@ -1,4 +1,8 @@
-use std::{path::{Path, PathBuf}, thread::sleep, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    thread::sleep,
+    time::Duration,
+};
 
 use ratatui::{
     DefaultTerminal,
@@ -22,9 +26,10 @@ use crate::{
     },
     config::{GttConfig, build_key_assignments, config_to_tuning_keys},
     export,
-    file::{MAX_PATTERNS, NUM_INSTRUMENTS, TrackerFile},
+    file::{NUM_INSTRUMENTS, TrackerFile},
+    pattern_ops::{copy_pattern, delete_pattern, move_pattern, new_pattern, zap_pattern},
     player::Player,
-    tracker::{BeatRow, DEFAULT_PATTERN_BEATS, NUM_ENVELOPES, VoiceBeat},
+    tracker::{BeatRow, NUM_ENVELOPES, VoiceBeat},
     validation::{ValidationError, validate_track},
 };
 
@@ -307,15 +312,17 @@ impl App {
                     }
                 }
                 ComponentAction::DeleteBeats(count) => {
-                    if let Some(rows) =
-                        self.tracker_container.delete_beats(&mut self.file_data, count)
+                    if let Some(rows) = self
+                        .tracker_container
+                        .delete_beats(&mut self.file_data, count)
                     {
                         self.beat_clipboard = rows;
                     }
                 }
                 ComponentAction::DeleteVoiceBeats(count) => {
-                    if let Some(rows) =
-                        self.tracker_container.delete_voice_beats(&mut self.file_data, count)
+                    if let Some(rows) = self
+                        .tracker_container
+                        .delete_voice_beats(&mut self.file_data, count)
                     {
                         self.voice_clipboard = rows;
                     }
@@ -326,8 +333,8 @@ impl App {
                 ComponentAction::Export => self.open_export_modal(false),
                 ComponentAction::ExportDirect => {
                     let export_dir = self.export_dir();
-                    let exportable = export::build_track(&self.file_data)
-                        .is_ok_and(|track| track.fits_bank());
+                    let exportable =
+                        export::build_track(&self.file_data).is_ok_and(|track| track.fits_bank());
                     if exportable && !export_dir.exists() {
                         match self.run_export(&export_dir) {
                             Ok(()) => self.tracker_container.mark_export_success(),
@@ -389,9 +396,8 @@ impl App {
                 }
                 ComponentAction::OpenPatternDeleteConfirm => {
                     if self.file_data.patterns.len() <= 1 {
-                        let idx = self.tracker_container.pattern_idx();
-                        *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
-                        self.file_data.set_beats_for(idx, DEFAULT_PATTERN_BEATS as u8);
+                        let idx = self.tracker_container.pattern_idx() as usize;
+                        delete_pattern(&mut self.file_data, idx);
                     } else if self.open_modal(Modal::PatternDeleteConfirm) {
                         self.pattern_delete_confirm.open();
                     }
@@ -417,48 +423,31 @@ impl App {
                     self.tracker_container
                         .paste_voice_beats(&mut self.file_data, &self.voice_clipboard);
                 }
-                ComponentAction::PatternCopy => {
-                    if self.file_data.patterns.len() >= MAX_PATTERNS {
-                        continue;
-                    }
+                ComponentAction::PatternCopy(slot) => {
                     let idx = self.tracker_container.pattern_idx() as usize;
-                    let copy = self.file_data.current_pattern(idx as u8).clone();
-                    let beats = self.file_data.beats_for(idx as u8);
-                    let insert_at = (idx + 1).min(self.file_data.patterns.len());
-                    self.file_data.patterns.insert(insert_at, copy);
-                    self.file_data.pattern_beats.insert(insert_at, beats);
-                    self.tracker_container.set_pattern_idx(insert_at as u8);
+                    if let Some(new_idx) = copy_pattern(&mut self.file_data, idx, slot) {
+                        self.tracker_container.set_pattern_idx(new_idx as u8);
+                    }
                 }
                 ComponentAction::PatternDelete => {
                     let idx = self.tracker_container.pattern_idx() as usize;
-                    if self.file_data.patterns.len() <= 1 {
-                        self.file_data.patterns[0] = crate::tracker::empty_pattern();
-                        self.file_data.pattern_beats[0] = DEFAULT_PATTERN_BEATS as u8;
-                    } else if idx < self.file_data.patterns.len() {
-                        self.file_data.patterns.remove(idx);
-                        if idx < self.file_data.pattern_beats.len() {
-                            self.file_data.pattern_beats.remove(idx);
-                        }
-                        let new_last = (self.file_data.patterns.len() - 1) as u8;
-                        let new_idx = idx.min(new_last as usize) as u8;
-                        self.tracker_container.set_pattern_idx(new_idx);
+                    if let Some(new_idx) = delete_pattern(&mut self.file_data, idx) {
+                        self.tracker_container.set_pattern_idx(new_idx as u8);
                     }
                 }
                 ComponentAction::PatternEdited => {}
                 ComponentAction::PatternGoTo(offset) => self.go_to_pattern(offset),
-                ComponentAction::PatternNew => {
-                    if self.file_data.patterns.len() >= MAX_PATTERNS {
-                        continue;
-                    }
+                ComponentAction::PatternMove(slot) => {
                     let idx = self.tracker_container.pattern_idx() as usize;
-                    let insert_at = (idx + 1).min(self.file_data.patterns.len());
-                    self.file_data
-                        .patterns
-                        .insert(insert_at, crate::tracker::empty_pattern());
-                    self.file_data
-                        .pattern_beats
-                        .insert(insert_at, DEFAULT_PATTERN_BEATS as u8);
-                    self.tracker_container.set_pattern_idx(insert_at as u8);
+                    if let Some(new_idx) = move_pattern(&mut self.file_data, idx, slot) {
+                        self.tracker_container.set_pattern_idx(new_idx as u8);
+                    }
+                }
+                ComponentAction::PatternNew(slot) => {
+                    let idx = self.tracker_container.pattern_idx() as usize;
+                    if let Some(new_idx) = new_pattern(&mut self.file_data, idx, slot) {
+                        self.tracker_container.set_pattern_idx(new_idx as u8);
+                    }
                 }
                 ComponentAction::PatternNext => self.go_to_pattern(1),
                 ComponentAction::PatternPrev => self.go_to_pattern(-1),
@@ -466,9 +455,8 @@ impl App {
                     self.tracker_container.clamp_selection(&self.file_data);
                 }
                 ComponentAction::PatternZap => {
-                    let idx = self.tracker_container.pattern_idx();
-                    *self.file_data.current_pattern_mut(idx) = crate::tracker::empty_pattern();
-                    self.file_data.set_beats_for(idx, DEFAULT_PATTERN_BEATS as u8);
+                    let idx = self.tracker_container.pattern_idx() as usize;
+                    zap_pattern(&mut self.file_data, idx);
                 }
                 ComponentAction::Play => {
                     if let Some(player) = &self.player {
@@ -552,8 +540,9 @@ impl App {
                     }
                 }
                 ComponentAction::YankVoiceBeats(count) => {
-                    if let Some(rows) =
-                        self.tracker_container.yank_voice_beats(&self.file_data, count)
+                    if let Some(rows) = self
+                        .tracker_container
+                        .yank_voice_beats(&self.file_data, count)
                     {
                         self.voice_clipboard = rows;
                     }
@@ -585,10 +574,11 @@ fn edits_track(action: &ComponentAction) -> bool {
             | ComponentAction::PasteAbove
             | ComponentAction::PasteBelow
             | ComponentAction::PasteVoiceBeats
-            | ComponentAction::PatternCopy
+            | ComponentAction::PatternCopy(_)
             | ComponentAction::PatternDelete
             | ComponentAction::PatternEdited
-            | ComponentAction::PatternNew
+            | ComponentAction::PatternMove(_)
+            | ComponentAction::PatternNew(_)
             | ComponentAction::PatternResized
             | ComponentAction::PatternZap
             | ComponentAction::TripleBeats

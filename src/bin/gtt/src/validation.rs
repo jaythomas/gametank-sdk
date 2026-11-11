@@ -35,7 +35,11 @@ fn jump_at(file: &TrackerFile, pattern_idx: usize, row: usize) -> Option<(usize,
         Some(SequencerCmd::Jump(p, b)) => (p, b, true),
         _ => return None,
     };
-    Some(((target as usize).min(file.patterns.len() - 1), beat, is_jump))
+    Some((
+        (target as usize).min(file.patterns.len() - 1),
+        beat,
+        is_jump,
+    ))
 }
 
 fn jump_loops_back(file: &TrackerFile, pattern_idx: usize, row: usize) -> bool {

@@ -569,17 +569,24 @@ impl EnvelopeEditor {
         let editing_field = self.editing_field;
 
         for (row_idx, field) in FIELDS.iter().enumerate() {
-            let [label_area, input_area, _, plus_area, minus_area, _, extra_area] =
-                Layout::horizontal([
-                    Constraint::Length(FIELD_LABEL_W),
-                    Constraint::Length(FIELD_INPUT_W),
-                    Constraint::Length(1),
-                    Constraint::Length(NUM_BTN_W),
-                    Constraint::Length(NUM_BTN_W),
-                    Constraint::Length(BTN_GAP),
-                    Constraint::Fill(1),
-                ])
-                .areas(rows[row_idx]);
+            let [
+                label_area,
+                input_area,
+                _,
+                plus_area,
+                minus_area,
+                _,
+                extra_area,
+            ] = Layout::horizontal([
+                Constraint::Length(FIELD_LABEL_W),
+                Constraint::Length(FIELD_INPUT_W),
+                Constraint::Length(1),
+                Constraint::Length(NUM_BTN_W),
+                Constraint::Length(NUM_BTN_W),
+                Constraint::Length(BTN_GAP),
+                Constraint::Fill(1),
+            ])
+            .areas(rows[row_idx]);
 
             frame.render_widget(
                 Paragraph::new(field.label()).style(default_style),

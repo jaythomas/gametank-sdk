@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::file_picker::{FilePicker, PickerOutcome};
 use rat_widget::button::{Button, ButtonState};
 use rat_widget::text::HasScreenCursor;
 use rat_widget::text_input::{TextInput, TextInputState, handle_events};
@@ -17,7 +18,6 @@ use ratatui::{
         ScrollbarState, Table,
     },
 };
-use super::file_picker::{FilePicker, PickerOutcome};
 
 use crate::{
     action::ComponentAction,
@@ -41,9 +41,13 @@ const REPEAT_NUM_PIVOT_HZ: f64 = 510.0;
 const REPEAT_NUM_PIVOT: i32 = 5;
 const REFERENCE_BASE_FREQ: f64 = 440.0;
 
-fn find_pivot_unison_degree(log_period: f64, period_ratio: f64, ratios: &[f64], n: usize) -> (i32, usize) {
-    let start_unison =
-        ((FREQ_MIN / REFERENCE_BASE_FREQ).ln() / log_period).floor() as i32 - 1;
+fn find_pivot_unison_degree(
+    log_period: f64,
+    period_ratio: f64,
+    ratios: &[f64],
+    n: usize,
+) -> (i32, usize) {
+    let start_unison = ((FREQ_MIN / REFERENCE_BASE_FREQ).ln() / log_period).floor() as i32 - 1;
     let end_unison = ((FREQ_MAX / REFERENCE_BASE_FREQ).ln() / log_period).ceil() as i32 + 1;
 
     let mut rows: Vec<(f64, i32, usize)> = Vec::new();
@@ -438,7 +442,8 @@ impl TuningEditor {
                 .then(a.2.cmp(&b.2))
         });
 
-        let (pivot_unison, pivot_degree) = find_pivot_unison_degree(log_period, period_ratio, &ratios, n);
+        let (pivot_unison, pivot_degree) =
+            find_pivot_unison_degree(log_period, period_ratio, &ratios, n);
 
         self.freq_rows = rows
             .into_iter()
@@ -948,7 +953,6 @@ impl Component for TuningEditor {
             self.file_picker.render(frame, content_area);
             return;
         }
-
 
         if content_area.height == 0 {
             return;

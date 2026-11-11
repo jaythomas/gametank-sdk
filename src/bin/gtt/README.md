@@ -109,25 +109,31 @@ The control deck allows you to edit global track parameters, pattern-level param
 
 **BPM** is the global BPM, entered in hex from 0001 to 0708 (1-1800).
 
+**FxSpeed** is the starting effects speed for the track (see **SEQ** commands for more details).
+
 **Beats** changes the length of the current pattern.
 
 **Trans** transposes the key bindings up/down one unison. With the default tuning, this means incrementing up one octave from c5-g6 to c6-g7. SHIFT key will also shift the range up temporarily.
-
-**FxSpeed** is the starting effects speed for the track (see **SEQ** commands for more details).
 
 **Instruments** - there are 8 total instruments, which can be swapped out on any beat on any channel to provide a lot of versatility. Instruments can be renamed from here, and their waveforms opened in the instrument editor from the `[⚙]` buttons. A new track starts with a spread of basic waveforms and two noise instruments.
 
 **Envelopes** - there are 8 total volume envelopes, assigned to a channel with the Envelope effect the same way an instrument is. They can be renamed from here, and their shapes opened in the [envelope editor](#envelope-editor) from the `[⚙]` buttons.
 
-**Tuning editor** opens the [tuning editor](#tuning-editor) for key assignment.
-
 **New/Open** will allow you to open an existing file or create a new file (press `n`). Default name is `track.gtt` or `track{n}.gtt` to avoid overwriting. Be sure to save before opening another file.
-
-**Save** writes the changes in memory to file.
 
 **Quit** will prompt to save changes before exiting so that you don't accidentally close the program with unsaved changes.
 
+**Save** writes the changes in memory to file.
+
 **Export** saves the track, instruments, and envelopes into a format consumable by the project. See [Using your tracks](#using-your-tracks) below.
+
+**Tuning editor** opens the [tuning editor](#tuning-editor) for key assignment.
+
+**Pattern XX** displays the active pattern. Directly below it are pattern operations. When patterns are moved, any Jump or JumpCount values attempt to recompute.
+- `[New]` creates a new empty pattern after the current pattern
+- `[Cpy]` copies the active pattern to the next index
+- `[Del]` deletes the active pattern (after confirmation)
+- `[Zap]` empties all values from the current pattern
 
 
 ## Command palette
@@ -138,14 +144,18 @@ Press Enter to execute or Esc to cancel the command input.
 
 | command          | hotkey          | description                                                       |
 | -------          | ------          | -----------                                                       |
+| `:cp`/`:copyp N` |                 | copy the active pattern and switch to the copy. Optionally a hexadecimal number of what index to copy to. -1 means put the copy at the end of the track. |
 | `:d`/`:delete N` | `Ctrl+d`        | cut the selected beat to the tracker's clipboard, or N beats in hex, e.g. `:d f` |
 | `:double`        |                 | insert an empty beat after every beat, useful for a pattern that needs double time resolution |
+| `:dp`/`:deletep` |                 | delete the active pattern after confirmation                      |
 | `:dv`/`:deletev N` | `Ctrl+x`      | cut the selected voice's note, volume, and effect to clipboard    |
 | `:envelope`      |                 | open envelope editor                                              |
 | `:exp`/`:export` |                 | export track                                                      |
 | `:instrument`    |                 | open instrument editor                                            |
 | `:m`             | `Ctrl+m`        | toggle mute on the active voice channel                           |
+| `:mp`/`:movep N` |                 | move the active pattern to index N in hex. -1 means move to end.  |
 | `:mute`/`:unmute`|                 | mute/unmute the active voice channel                              |
+| `:np`/`:newp N`  |                 | create an empty pattern and switch to it                          |
 | `:p`/`:paste`    | `Ctrl+p`        | insert clipboard contents below the selected row                  |
 | `:P`/`:Paste`    | `Ctrl+Shift+p`  | insert clipboard contents above the selected row                  |
 | `:play`          | `Space`         | toggle playback from the selected row                             |
@@ -158,6 +168,7 @@ Press Enter to execute or Esc to cancel the command input.
 | `:w`/`:write`    |                 | save changes to file                                              |
 | `:y`/`:yank N`   | `Ctrl+y`        | copy the selected beat, or N rows in hex                          |
 | `:yv`/`:yankv`   | `Ctrl+c`        | copy the selected voice's note, volume, and effect to a clipboard |
+| `:zap`           |                 | clear the active pattern                                          |
 
 ## Instrument editor
 

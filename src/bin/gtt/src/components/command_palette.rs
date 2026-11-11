@@ -10,7 +10,10 @@ use ratatui::{
 };
 
 use crate::{
-    action::ComponentAction, component::Component, file::TrackerFile, scheme::SCHEME,
+    action::{ComponentAction, PatternSlot},
+    component::Component,
+    file::TrackerFile,
+    scheme::SCHEME,
     tracker::{PATTERN_BEATS, PATTERN_TABLE_WIDTH},
 };
 
@@ -37,7 +40,10 @@ impl CommandPalette {
 /// anything larger than a pattern.
 fn parse_row_count(arg: Option<&str>) -> Option<usize> {
     let Some(arg) = arg else { return Some(1) };
-    let digits = arg.strip_prefix("0x").or(arg.strip_prefix("0X")).unwrap_or(arg);
+    let digits = arg
+        .strip_prefix("0x")
+        .or(arg.strip_prefix("0X"))
+        .unwrap_or(arg);
     let count = usize::from_str_radix(digits, 16).ok()?;
     (1..=PATTERN_BEATS).contains(&count).then_some(count)
 }
@@ -47,29 +53,62 @@ fn parse_pattern_offset(arg: &str) -> Option<isize> {
         Some(rest) => ("-", rest),
         None => ("", arg),
     };
-    let digits = unsigned.strip_prefix("0x").or(unsigned.strip_prefix("0X")).unwrap_or(unsigned);
+    let digits = unsigned
+        .strip_prefix("0x")
+        .or(unsigned.strip_prefix("0X"))
+        .unwrap_or(unsigned);
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
     isize::from_str_radix(&format!("{sign}{digits}"), 16).ok()
 }
 
+fn parse_pattern_slot(arg: &str) -> Option<PatternSlot> {
+    if arg == "-1" {
+        return Some(PatternSlot::End);
+    }
+    let digits = arg
+        .strip_prefix("0x")
+        .or(arg.strip_prefix("0X"))
+        .unwrap_or(arg);
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    usize::from_str_radix(digits, 16).ok().map(PatternSlot::At)
+}
+
 fn parse_command(input: &str) -> Vec<ComponentAction> {
     let mut parts = input.split_whitespace();
-    let Some(name) = parts.next() else { return Vec::new() };
+    let Some(name) = parts.next() else {
+        return Vec::new();
+    };
     let arg = parts.next();
     if parts.next().is_some() {
         return Vec::new();
     }
     let action = match (name, arg) {
+        ("cp" | "copyp", _) => match arg {
+            None => Some(PatternSlot::AfterCurrent),
+            Some(arg) => parse_pattern_slot(arg),
+        }
+        .map(ComponentAction::PatternCopy),
         ("d" | "delete", _) => parse_row_count(arg).map(ComponentAction::DeleteBeats),
         ("double", None) => Some(ComponentAction::DoubleBeats),
+        ("dp" | "deletep", None) => Some(ComponentAction::OpenPatternDeleteConfirm),
         ("dv" | "deletev", _) => parse_row_count(arg).map(ComponentAction::DeleteVoiceBeats),
         ("envelope", None) => Some(ComponentAction::OpenEnvelopeEditor(0)),
         ("exp" | "export", None) => Some(ComponentAction::ExportDirect),
         ("instrument", None) => Some(ComponentAction::OpenInstrumentEditor(0)),
         ("m", None) => Some(ComponentAction::ToggleMuteChannel),
+        ("mp" | "movep", _) => arg
+            .and_then(parse_pattern_slot)
+            .map(ComponentAction::PatternMove),
         ("mute", None) => Some(ComponentAction::MuteChannel),
+        ("np" | "newp", _) => match arg {
+            None => Some(PatternSlot::AfterCurrent),
+            Some(arg) => parse_pattern_slot(arg),
+        }
+        .map(ComponentAction::PatternNew),
         ("p" | "paste", None) => Some(ComponentAction::PasteBelow),
         ("P" | "Paste", None) => Some(ComponentAction::PasteAbove),
         ("play", None) => Some(ComponentAction::Play),
@@ -87,6 +126,7 @@ fn parse_command(input: &str) -> Vec<ComponentAction> {
         ("yv" | "yankv" | "yankovic" | "weirdal", _) => {
             parse_row_count(arg).map(ComponentAction::YankVoiceBeats)
         }
+        ("zap", None) => Some(ComponentAction::PatternZap),
         _ => None,
     };
     action.into_iter().collect()

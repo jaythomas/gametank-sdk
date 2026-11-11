@@ -7,6 +7,7 @@ mod config;
 mod export;
 mod file;
 mod lane;
+mod pattern_ops;
 mod player;
 mod sample_rate;
 mod scheme;
@@ -19,6 +20,7 @@ use cli_args::CommandLineArgs;
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
+    player::silence_alsa_errors();
     let args = CommandLineArgs::parse();
     let result = app::App::new(args.input)?.run();
     ratatui::restore();

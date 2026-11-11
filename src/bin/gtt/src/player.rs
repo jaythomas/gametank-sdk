@@ -10,10 +10,10 @@ use gte_w65c02s::W65C02S;
 use indexmap::IndexMap;
 
 use crate::file::NUM_INSTRUMENTS;
+use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
 use crate::tracker::{
     DEFAULT_PATTERN_BEATS, MAX_VOLUME, NUM_ENVELOPES, PATTERN_BEATS, VOLUME_LEVELS, envelope_slot,
 };
-use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
 use crate::volume_scale::{SCALE_STRIDE, scale_table};
 
 const FIRMWARE: &[u8; 4096] =
@@ -21,16 +21,8 @@ const FIRMWARE: &[u8; 4096] =
 
 const AUDIO_CHANNELS: usize = 7;
 
-
 const WAVETABLE: [u16; NUM_INSTRUMENTS] = [
-    0x0700,
-    0x0800,
-    0x0900,
-    0x0A00,
-    0x0B00,
-    0x0C00,
-    0x0D00,
-    0x0E00,
+    0x0700, 0x0800, 0x0900, 0x0A00, 0x0B00, 0x0C00, 0x0D00, 0x0E00,
 ];
 
 /// ACP RAM addresses of the firmware's gain tables, indexed by volume level.
@@ -245,12 +237,20 @@ impl PlayerInner {
                     self.tick_count = 0;
                     self.rebuild_channel_state(self.current_pattern_idx, row);
                     for ch in 0..AUDIO_CHANNELS {
-                        self.set_voice_volume(ch, if self.muted[ch] { 0 } else { self.remembered_vol[ch] });
+                        self.set_voice_volume(
+                            ch,
+                            if self.muted[ch] {
+                                0
+                            } else {
+                                self.remembered_vol[ch]
+                            },
+                        );
                     }
                     self.trigger_row();
                     self.samples_until_next_beat = self.samples_per_beat;
                     self.samples_until_next_tick = self.samples_per_tick;
-                    self.current_row_out.store(self.current_row, Ordering::Relaxed);
+                    self.current_row_out
+                        .store(self.current_row, Ordering::Relaxed);
                     self.current_pattern_out
                         .store(self.current_pattern_idx, Ordering::Relaxed);
                     self.is_playing_out.store(true, Ordering::Relaxed);
@@ -317,7 +317,9 @@ impl PlayerInner {
         let base = WAVETABLE[idx] as usize;
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
-            for (dst, src) in (&mut (*aram_ptr))[base..base + 256].iter_mut().zip(waveform.iter())
+            for (dst, src) in (&mut (*aram_ptr))[base..base + 256]
+                .iter_mut()
+                .zip(waveform.iter())
             {
                 *dst = *src & 0xFC;
             }
@@ -345,7 +347,11 @@ impl PlayerInner {
 
     fn set_voice_volume(&mut self, ch: usize, volume: u8) {
         let base = voice_code(ch) + GAIN_OFFSET;
-        let level = if self.channel_muted[ch] { 0 } else { volume.min(MAX_VOLUME) };
+        let level = if self.channel_muted[ch] {
+            0
+        } else {
+            volume.min(MAX_VOLUME)
+        };
         let page = GAIN_PAGE[level as usize];
         unsafe {
             let aram_ptr = std::ptr::addr_of_mut!(ARAM);
@@ -427,8 +433,16 @@ impl PlayerInner {
             let mut muted = true;
             let mut note_name: Option<String> = None;
             let mut base_freq: u16 = 0;
-            let mut instrument = if from_song_start { ch } else { self.current_instrument[ch] };
-            let mut env_slot: Option<usize> = if from_song_start { None } else { self.env_slot[ch] };
+            let mut instrument = if from_song_start {
+                ch
+            } else {
+                self.current_instrument[ch]
+            };
+            let mut env_slot: Option<usize> = if from_song_start {
+                None
+            } else {
+                self.env_slot[ch]
+            };
             let mut env_suppressed = false;
             for r in 0..row {
                 let beat = &self.patterns[pattern_idx][ch + 1][r];
@@ -485,7 +499,7 @@ impl PlayerInner {
                     SequencerCmd::Stop
                     | SequencerCmd::FlowCount(_)
                     | SequencerCmd::CountJump(_, _) => {}
-                    | SequencerCmd::Jump(_, _) => {}
+                    SequencerCmd::Jump(_, _) => {}
                 }
             }
         }
@@ -635,7 +649,9 @@ impl PlayerInner {
             self.set_voice_volume(ch, vol);
 
             if let Some((x, y)) = maybe_arp {
-                let note_name = maybe_note.clone().or_else(|| self.cur_note_name[ch].clone());
+                let note_name = maybe_note
+                    .clone()
+                    .or_else(|| self.cur_note_name[ch].clone());
                 if let Some(note_name) = &note_name {
                     self.arp_x_freq[ch] = self
                         .arp_offset_freq(note_name, x)
@@ -658,7 +674,9 @@ impl PlayerInner {
                 }
             } else if let Some(x) = maybe_pitch_up {
                 self.arp_active[ch] = false;
-                let note_name = maybe_note.clone().or_else(|| self.cur_note_name[ch].clone());
+                let note_name = maybe_note
+                    .clone()
+                    .or_else(|| self.cur_note_name[ch].clone());
                 if let Some(note_name) = &note_name {
                     self.pitch_target[ch] = self
                         .arp_offset_freq(note_name, x)
@@ -672,7 +690,9 @@ impl PlayerInner {
                 }
             } else if let Some(x) = maybe_pitch_down {
                 self.arp_active[ch] = false;
-                let note_name = maybe_note.clone().or_else(|| self.cur_note_name[ch].clone());
+                let note_name = maybe_note
+                    .clone()
+                    .or_else(|| self.cur_note_name[ch].clone());
                 if let Some(note_name) = &note_name {
                     self.pitch_target[ch] = self
                         .pitch_down_offset_freq(note_name, x)
@@ -851,6 +871,46 @@ impl PlayerInner {
     }
 }
 
+/// Suppress errors like ALSA lib that go straight to stderr and clobber the UI
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+pub fn silence_alsa_errors() {
+    use std::os::raw::{c_char, c_int};
+
+    // The real handler type is variadic, which stable Rust cannot define. A
+    // handler that ignores its arguments is safe with this fixed signature.
+    type Handler = unsafe extern "C" fn(*const c_char, c_int, *const c_char, c_int, *const c_char);
+
+    unsafe extern "C" fn ignore(
+        _: *const c_char,
+        _: c_int,
+        _: *const c_char,
+        _: c_int,
+        _: *const c_char,
+    ) {
+    }
+
+    unsafe extern "C" {
+        fn snd_lib_error_set_handler(handler: Option<Handler>) -> c_int;
+    }
+
+    unsafe {
+        snd_lib_error_set_handler(Some(ignore));
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd"
+)))]
+pub fn silence_alsa_errors() {}
+
 pub struct Player {
     cmd_tx: Sender<PlayerCmd>,
     current_row: Arc<AtomicUsize>,
@@ -889,7 +949,8 @@ impl Player {
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     inner.fill_output(data);
                 },
-                |err| eprintln!("audio stream error: {err}"),
+                // Printing to stderr would draw over the TUI.
+                |_err| {},
                 None,
             )
             .ok()?;

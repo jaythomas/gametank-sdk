@@ -189,7 +189,11 @@ fn is_voice_cmd(cmd: &ChannelCmd) -> bool {
 
 fn voice_beat_of(beat: &Beat) -> VoiceBeat {
     let find = |pred: fn(&ChannelCmd) -> bool| beat.cmd_list.iter().find(|c| pred(c)).cloned();
-    VoiceBeat { note: find(is_note_cmd), vol: find(is_vol_cmd), fx: find(is_fx_cmd) }
+    VoiceBeat {
+        note: find(is_note_cmd),
+        vol: find(is_vol_cmd),
+        fx: find(is_fx_cmd),
+    }
 }
 
 pub fn yank_voice_rows(
@@ -203,7 +207,12 @@ pub fn yank_voice_rows(
     if count == 0 || start + count > beats {
         return None;
     }
-    Some(pattern[ch + 1][start..start + count].iter().map(voice_beat_of).collect())
+    Some(
+        pattern[ch + 1][start..start + count]
+            .iter()
+            .map(voice_beat_of)
+            .collect(),
+    )
 }
 
 pub fn clear_voice_rows(pattern: &mut Pattern, beats: u8, ch: usize, start: u8, count: usize) {
@@ -225,7 +234,12 @@ pub fn paste_voice_rows(
     let n = clip.len().min((beats as usize).saturating_sub(start));
     for (beat, voice) in pattern[ch + 1][start..start + n].iter_mut().zip(clip) {
         beat.cmd_list.retain(|c| !is_voice_cmd(c));
-        beat.cmd_list.extend([&voice.note, &voice.vol, &voice.fx].into_iter().flatten().cloned());
+        beat.cmd_list.extend(
+            [&voice.note, &voice.vol, &voice.fx]
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
     }
 }
 
@@ -237,7 +251,11 @@ fn spread_count(beats: u8, factor: u8) -> u8 {
 
 pub fn row_after_spreading(beats: u8, row: u8, factor: u8) -> u8 {
     let spread = spread_count(beats, factor);
-    if row < spread { row * factor } else { row + spread * (factor - 1) }
+    if row < spread {
+        row * factor
+    } else {
+        row + spread * (factor - 1)
+    }
 }
 
 // Inserts (factor - 1) empty rows after every row, as many as fit in the

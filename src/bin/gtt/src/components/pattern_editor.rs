@@ -19,9 +19,9 @@ use crate::{
     lane::{Lane, LaneKind},
     scheme::SCHEME,
     tracker::{
-        Beat, ChannelCmd, DEFAULT_PATTERN_BEATS, FX_ID_ARPEGGIO, FX_ID_ENVELOPE,
-        FX_ID_INSTRUMENT, FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, MAX_FX_ID, MAX_FX_SPEED,
-        MAX_INSTRUMENT_INDEX, MAX_TEMPO, MAX_VOLUME, Pattern, SequencerCmd,
+        Beat, ChannelCmd, DEFAULT_PATTERN_BEATS, FX_ID_ARPEGGIO, FX_ID_ENVELOPE, FX_ID_INSTRUMENT,
+        FX_ID_PITCH_DOWN, FX_ID_PITCH_UP, MAX_FX_ID, MAX_FX_SPEED, MAX_INSTRUMENT_INDEX, MAX_TEMPO,
+        MAX_VOLUME, Pattern, SequencerCmd,
     },
     validation::ValidationError,
 };
@@ -54,7 +54,7 @@ fn seq_cmd_shorthand(cmd: &SequencerCmd) -> (char, ratatui::style::Color) {
         SequencerCmd::FxSpeed(_) => ('X', SCHEME.purple[1]),
         SequencerCmd::FlowCount(_) => ('#', SCHEME.yellow[1]),
         SequencerCmd::CountJump(_, _) => ('j', SCHEME.yellow[1]),
-        SequencerCmd::Jump(_,_) => ('J', SCHEME.yellow[1]),
+        SequencerCmd::Jump(_, _) => ('J', SCHEME.yellow[1]),
     }
 }
 
@@ -104,7 +104,7 @@ fn seq_cmd_set_arg2(cmd: &SequencerCmd, v: u8, b: u8) -> SequencerCmd {
         SequencerCmd::FxSpeed(_) => SequencerCmd::FxSpeed(v),
         SequencerCmd::FlowCount(_) => SequencerCmd::FlowCount(v),
         SequencerCmd::CountJump(_, _) => SequencerCmd::CountJump(v, b),
-        SequencerCmd::Jump(_, _) => SequencerCmd::Jump(v, b)
+        SequencerCmd::Jump(_, _) => SequencerCmd::Jump(v, b),
     }
 }
 
@@ -419,7 +419,8 @@ impl CellDisplay {
                     "{:01X}{:01X}{}",
                     id,
                     x,
-                    y.map(|y| format!("{:01X}", y)).unwrap_or_else(|| "-".to_string())
+                    y.map(|y| format!("{:01X}", y))
+                        .unwrap_or_else(|| "-".to_string())
                 ),
                 Some((id, x, _)) => format!("{:01X}{:02X}", id, x),
             },
@@ -523,39 +524,50 @@ impl Component for PatternEditor {
                 else {
                     continue;
                 };
-            match code {
-                KeyCode::Up => {
-                    self.sel_y = if self.sel_y == 0 { self.beats.saturating_sub(1) } else { self.sel_y - 1 };
-                    self.edit = EditState::Idle;
+                match code {
+                    KeyCode::Up => {
+                        self.sel_y = if self.sel_y == 0 {
+                            self.beats.saturating_sub(1)
+                        } else {
+                            self.sel_y - 1
+                        };
+                        self.edit = EditState::Idle;
+                    }
+                    KeyCode::Down => {
+                        self.sel_y = if self.sel_y + 1 >= self.beats {
+                            0
+                        } else {
+                            self.sel_y + 1
+                        };
+                        self.edit = EditState::Idle;
+                    }
+                    KeyCode::Left => {
+                        self.sel_x = if self.sel_x == 0 {
+                            self.lanes.len() as u8 - 1
+                        } else {
+                            self.sel_x - 1
+                        };
+                        self.edit = EditState::Idle;
+                    }
+                    KeyCode::Right => {
+                        self.sel_x = (self.sel_x + 1) % self.lanes.len() as u8;
+                        self.edit = EditState::Idle;
+                    }
+                    KeyCode::PageUp => {
+                        let step = (self.view_layout.page_h / 2).max(1) as u8;
+                        self.sel_y = self.sel_y.saturating_sub(step);
+                        self.edit = EditState::Idle;
+                    }
+                    KeyCode::PageDown => {
+                        let step = (self.view_layout.page_h / 2).max(1) as u8;
+                        self.sel_y = self
+                            .sel_y
+                            .saturating_add(step)
+                            .min(self.beats.saturating_sub(1));
+                        self.edit = EditState::Idle;
+                    }
+                    _ => {}
                 }
-                KeyCode::Down => {
-                    self.sel_y = if self.sel_y + 1 >= self.beats { 0 } else { self.sel_y + 1 };
-                    self.edit = EditState::Idle;
-                }
-                KeyCode::Left => {
-                    self.sel_x = if self.sel_x == 0 {
-                        self.lanes.len() as u8 - 1
-                    } else {
-                        self.sel_x - 1
-                    };
-                    self.edit = EditState::Idle;
-                }
-                KeyCode::Right => {
-                    self.sel_x = (self.sel_x + 1) % self.lanes.len() as u8;
-                    self.edit = EditState::Idle;
-                }
-                KeyCode::PageUp => {
-                    let step = (self.view_layout.page_h / 2).max(1) as u8;
-                    self.sel_y = self.sel_y.saturating_sub(step);
-                    self.edit = EditState::Idle;
-                }
-                KeyCode::PageDown => {
-                    let step = (self.view_layout.page_h / 2).max(1) as u8;
-                    self.sel_y = self.sel_y.saturating_add(step).min(self.beats.saturating_sub(1));
-                    self.edit = EditState::Idle;
-                }
-                _ => {}
-            }
             }
         }
 
@@ -724,8 +736,7 @@ impl Component for PatternEditor {
                     let (mut fx_id, mut fx_x, mut fx_y, digits_typed) = match self.edit {
                         EditState::Fx(c, n) if c == cell => {
                             let pattern = file.current_pattern(self.pattern_idx);
-                            let (id, x, y) =
-                                pattern[channel + 1][row].fx().unwrap_or((0, 0, None));
+                            let (id, x, y) = pattern[channel + 1][row].fx().unwrap_or((0, 0, None));
                             (id, x, y, n)
                         }
                         _ => (0, 0, None, 0),
@@ -857,15 +868,16 @@ impl Component for PatternEditor {
                                 self.edit = EditState::Seq(cell, (digits_typed + 1).min(4));
                                 Some(SequencerCmd::Tempo(value))
                             }
-                            Some(cmd @ (SequencerCmd::FxSpeed(v)
-                            | SequencerCmd::FlowCount(v))) => {
+                            Some(cmd @ (SequencerCmd::FxSpeed(v) | SequencerCmd::FlowCount(v))) => {
                                 let max = seq_cmd_single_arg_max(cmd).unwrap();
                                 let prev = if digits_typed == 0 { 0 } else { *v };
                                 let value = shift_in_hex_digit(prev, digit, max);
                                 self.edit = EditState::Seq(cell, (digits_typed + 1).min(2));
                                 Some(seq_cmd_set_arg0(cmd, value))
                             }
-                            Some(cmd @ (SequencerCmd::CountJump(p, b) | SequencerCmd::Jump(p, b))) => {
+                            Some(
+                                cmd @ (SequencerCmd::CountJump(p, b) | SequencerCmd::Jump(p, b)),
+                            ) => {
                                 let (mut p, mut b) = (*p, *b);
                                 if digits_typed < 2 {
                                     let prev = if digits_typed == 0 { 0 } else { p };
@@ -917,8 +929,9 @@ impl Component for PatternEditor {
                                     };
                                     Some(SequencerCmd::Tempo(value))
                                 }
-                                Some(cmd @ (SequencerCmd::FxSpeed(v)
-                                | SequencerCmd::FlowCount(v))) => {
+                                Some(
+                                    cmd @ (SequencerCmd::FxSpeed(v) | SequencerCmd::FlowCount(v)),
+                                ) => {
                                     let max = seq_cmd_single_arg_max(cmd).unwrap();
                                     let value = if inc {
                                         v.saturating_add(1).min(max)
@@ -1106,7 +1119,8 @@ impl PatternEditor {
             return;
         };
         let cell_y = header_bottom + visible_row as u16;
-        if cell_y < header_bottom || cell_y >= self.view_layout.table.y + self.view_layout.table.height
+        if cell_y < header_bottom
+            || cell_y >= self.view_layout.table.y + self.view_layout.table.height
         {
             return;
         }
@@ -1140,10 +1154,8 @@ impl PatternEditor {
         let bg = SCHEME.true_dark_color(SCHEME.black[3]);
         let blank_style = Style::new().bg(bg).fg(SCHEME.white[2]);
         let blank_line = |width: u16| {
-            Line::from(" ".repeat(width as usize)).style(
-                blank_style
-                    .remove_modifier(Modifier::REVERSED | Modifier::SLOW_BLINK),
-            )
+            Line::from(" ".repeat(width as usize))
+                .style(blank_style.remove_modifier(Modifier::REVERSED | Modifier::SLOW_BLINK))
         };
         frame.render_widget(blank_line(cell_area.width), cell_area);
         let popup_len = SEQ_CHOICE_LABELS.len() as u16;
@@ -1240,5 +1252,3 @@ impl PatternEditor {
         }
     }
 }
-
-

@@ -2,6 +2,13 @@ use std::path::PathBuf;
 
 use crate::file::TuningData;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatternSlot {
+    AfterCurrent,
+    End,
+    At(usize),
+}
+
 pub enum ComponentAction {
     RequestFocus,
     OpenInstrumentEditor(usize),
@@ -26,9 +33,10 @@ pub enum ComponentAction {
     PatternNext,
     PatternResized,
     PatternGoTo(isize),
-    PatternNew,
-    PatternCopy,
+    PatternNew(PatternSlot),
+    PatternCopy(PatternSlot),
     PatternDelete,
+    PatternMove(PatternSlot),
     PatternEdited,
     PatternZap,
     OpenPatternDeleteConfirm,

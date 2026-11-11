@@ -15,7 +15,7 @@ use ratatui::{
 };
 
 use crate::{
-    action::ComponentAction,
+    action::{ComponentAction, PatternSlot},
     component::Component,
     file::{NUM_INSTRUMENTS, TrackerFile},
     scheme::SCHEME,
@@ -1011,7 +1011,7 @@ impl ControlDeck {
             }
             self.selected_row = Row::PatternNew;
             self.selected_col = Col::Open;
-            actions.push(ComponentAction::PatternNew);
+            actions.push(ComponentAction::PatternNew(PatternSlot::AfterCurrent));
             self.update_focus_states();
             return true;
         }
@@ -1021,7 +1021,7 @@ impl ControlDeck {
             }
             self.selected_row = Row::PatternCopy;
             self.selected_col = Col::Open;
-            actions.push(ComponentAction::PatternCopy);
+            actions.push(ComponentAction::PatternCopy(PatternSlot::AfterCurrent));
             self.update_focus_states();
             return true;
         }
@@ -1090,8 +1090,10 @@ impl Component for ControlDeck {
                                 self.update_focus_states();
                             }
                             KeyCode::Char(c)
-                                if matches!(self.selected_row, Row::Bpm | Row::FxSpeed | Row::Beats)
-                                    && !c.is_ascii_hexdigit() => {}
+                                if matches!(
+                                    self.selected_row,
+                                    Row::Bpm | Row::FxSpeed | Row::Beats
+                                ) && !c.is_ascii_hexdigit() => {}
                             KeyCode::Char(c)
                                 if self.selected_row == Row::Trans
                                     && !c.is_ascii_digit()
@@ -1201,8 +1203,7 @@ impl Component for ControlDeck {
                                             actions.push(ComponentAction::OpenFileBrowser);
                                         }
                                         Row::Instrument(i) => {
-                                            actions
-                                                .push(ComponentAction::OpenInstrumentEditor(i));
+                                            actions.push(ComponentAction::OpenInstrumentEditor(i));
                                         }
                                         Row::Envelope(i) => {
                                             actions.push(ComponentAction::OpenEnvelopeEditor(i));
@@ -1228,14 +1229,17 @@ impl Component for ControlDeck {
                                             actions.push(ComponentAction::PatternNext);
                                         }
                                         Row::PatternNew => {
-                                            actions.push(ComponentAction::PatternNew);
+                                            actions.push(ComponentAction::PatternNew(
+                                                PatternSlot::AfterCurrent,
+                                            ));
                                         }
                                         Row::PatternCopy => {
-                                            actions.push(ComponentAction::PatternCopy);
+                                            actions.push(ComponentAction::PatternCopy(
+                                                PatternSlot::AfterCurrent,
+                                            ));
                                         }
                                         Row::PatternDelete => {
-                                            actions
-                                                .push(ComponentAction::OpenPatternDeleteConfirm);
+                                            actions.push(ComponentAction::OpenPatternDeleteConfirm);
                                         }
                                         Row::PatternZap => {
                                             actions.push(ComponentAction::PatternZap);
@@ -1642,15 +1646,20 @@ impl Component for ControlDeck {
         const PATTERN_COPY_W: u16 = 5;
         const PATTERN_DELETE_W: u16 = 5;
         const PATTERN_ZAP_W: u16 = 5;
-        let [pattern_new_area, pattern_copy_area, pattern_delete_area, pattern_zap_area, _] =
-            Layout::horizontal([
-                Constraint::Length(PATTERN_NEW_W),
-                Constraint::Length(PATTERN_COPY_W),
-                Constraint::Length(PATTERN_DELETE_W),
-                Constraint::Length(PATTERN_ZAP_W),
-                Constraint::Fill(1),
-            ])
-            .areas(pattern_mgmt_row);
+        let [
+            pattern_new_area,
+            pattern_copy_area,
+            pattern_delete_area,
+            pattern_zap_area,
+            _,
+        ] = Layout::horizontal([
+            Constraint::Length(PATTERN_NEW_W),
+            Constraint::Length(PATTERN_COPY_W),
+            Constraint::Length(PATTERN_DELETE_W),
+            Constraint::Length(PATTERN_ZAP_W),
+            Constraint::Fill(1),
+        ])
+        .areas(pattern_mgmt_row);
 
         self.pattern_new_btn.focus.set(pattern_new_focused);
         self.pattern_copy_btn.focus.set(pattern_copy_focused);

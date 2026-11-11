@@ -508,4 +508,3 @@ impl TrackerFile {
         std::fs::write(path, bytes)
     }
 }
-

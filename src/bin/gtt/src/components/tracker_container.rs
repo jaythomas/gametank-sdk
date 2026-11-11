@@ -103,8 +103,12 @@ impl TrackerContainer {
     pub fn delete_beats(&mut self, file: &mut TrackerFile, count: usize) -> Option<Vec<BeatRow>> {
         let idx = self.pattern_idx();
         let beats = file.beats_for(idx);
-        let (removed, new_beats) =
-            delete_rows(file.current_pattern_mut(idx), beats, self.current_row(), count)?;
+        let (removed, new_beats) = delete_rows(
+            file.current_pattern_mut(idx),
+            beats,
+            self.current_row(),
+            count,
+        )?;
         file.set_beats_for(idx, new_beats);
         self.pattern_editor.end_cell_edit();
         Some(removed)
@@ -118,7 +122,11 @@ impl TrackerContainer {
         };
         file.set_beats_for(idx, new_beats);
         remap_jump_targets(&mut file.patterns, idx, |target| {
-            if target < beats { row_after_spreading(beats, target, factor) } else { target }
+            if target < beats {
+                row_after_spreading(beats, target, factor)
+            } else {
+                target
+            }
         });
         self.set_current_row(row_after_spreading(beats, self.current_row(), factor));
         self.pattern_editor.end_cell_edit();
@@ -127,7 +135,12 @@ impl TrackerContainer {
     /// Copies `count` rows from the selected row.
     pub fn yank_beats(&self, file: &TrackerFile, count: usize) -> Option<Vec<BeatRow>> {
         let idx = self.pattern_idx();
-        yank_rows(file.current_pattern(idx), file.beats_for(idx), self.current_row(), count)
+        yank_rows(
+            file.current_pattern(idx),
+            file.beats_for(idx),
+            self.current_row(),
+            count,
+        )
     }
 
     pub fn yank_voice_beats(&self, file: &TrackerFile, count: usize) -> Option<Vec<VoiceBeat>> {
@@ -151,16 +164,30 @@ impl TrackerContainer {
         let ch = self.active_channel()?;
         let idx = self.pattern_idx();
         let beats = file.beats_for(idx);
-        clear_voice_rows(file.current_pattern_mut(idx), beats, ch, self.current_row(), count);
+        clear_voice_rows(
+            file.current_pattern_mut(idx),
+            beats,
+            ch,
+            self.current_row(),
+            count,
+        );
         self.pattern_editor.end_cell_edit();
         Some(rows)
     }
 
     pub fn paste_voice_beats(&mut self, file: &mut TrackerFile, clip: &[VoiceBeat]) {
-        let Some(ch) = self.active_channel() else { return };
+        let Some(ch) = self.active_channel() else {
+            return;
+        };
         let idx = self.pattern_idx();
         let beats = file.beats_for(idx);
-        paste_voice_rows(file.current_pattern_mut(idx), beats, ch, self.current_row(), clip);
+        paste_voice_rows(
+            file.current_pattern_mut(idx),
+            beats,
+            ch,
+            self.current_row(),
+            clip,
+        );
         self.pattern_editor.end_cell_edit();
     }
 
@@ -253,7 +280,8 @@ impl Component for TrackerContainer {
                     code: KeyCode::Char(' '),
                     kind: KeyEventKind::Press,
                     ..
-                }) if !(self.active_focus == AppFocus::ControlDeck && self.control_deck.editing) =>
+                }) if !(self.active_focus == AppFocus::ControlDeck
+                    && self.control_deck.editing) =>
                 {
                     actions_out.push(ComponentAction::Play);
                 }
@@ -351,6 +379,3 @@ fn render_focus_indicator(frame: &mut Frame, area: Rect) {
         }
     }
 }
-
-
-

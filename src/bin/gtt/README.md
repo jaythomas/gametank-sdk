@@ -129,7 +129,7 @@ The control deck allows you to edit global track parameters, pattern-level param
 
 **Tuning editor** opens the [tuning editor](#tuning-editor) for key assignment.
 
-**Pattern XX** displays the active pattern. Directly below it are pattern operations. When patterns are moved, any Jump or JumpCount values attempt to recompute.
+**Pattern XX** displays the active pattern. Directly below it are pattern operations. When patterns are moved, any Jump or CountJump values attempt to recompute.
 - `[New]` creates a new empty pattern after the current pattern
 - `[Cpy]` copies the active pattern to the next index
 - `[Del]` deletes the active pattern (after confirmation)

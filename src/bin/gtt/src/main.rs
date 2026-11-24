@@ -11,6 +11,7 @@ mod pattern_ops;
 mod player;
 mod sample_rate;
 mod scheme;
+mod track_state;
 mod tracker;
 mod validation;
 mod volume_scale;

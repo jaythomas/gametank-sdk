@@ -22,6 +22,7 @@ pub enum ComponentAction {
     CloseModal,
     ConfirmExport(PathBuf),
     Play,
+    PreviewNote { ch: usize, pattern: u8, row: u8 },
     Quit,
     SaveAndQuit,
     InstrumentSaved(usize, [u8; 256]),

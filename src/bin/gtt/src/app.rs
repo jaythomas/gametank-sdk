@@ -29,6 +29,7 @@ use crate::{
     file::{NUM_INSTRUMENTS, TrackerFile},
     pattern_ops::{copy_pattern, delete_pattern, move_pattern, new_pattern, zap_pattern},
     player::Player,
+    track_state::track_state_at,
     tracker::{BeatRow, NUM_ENVELOPES, VoiceBeat},
     validation::{ValidationError, validate_track},
 };
@@ -469,20 +470,20 @@ impl App {
                             let patterns = self.file_data.patterns.clone();
                             let beats_list = self.file_data.pattern_beats.clone();
                             player.update_patterns(patterns, beats_list);
-                            for i in 0..NUM_INSTRUMENTS {
-                                player.update_waveform(i, self.file_data.instrument_waveform(i));
-                            }
-                            player.update_tuning_notes(self.file_data.tuning.notes.clone());
-                            player.update_envelopes(
-                                (0..NUM_ENVELOPES)
-                                    .map(|i| self.file_data.envelope_steps(i))
-                                    .collect(),
-                            );
-                            player.set_bpm(self.file_data.bpm);
-                            player.set_fx_speed(self.file_data.fx_speed);
-                            player.play(pattern_idx, row);
+                            sync_player_assets(player, &self.file_data);
+                            let state = track_state_at(&self.file_data, pattern_idx, row);
+                            player.play(pattern_idx, row, state);
                             self.tracker_container.set_playing(true);
                         }
+                    }
+                }
+                ComponentAction::PreviewNote { ch, pattern, row } => {
+                    if let Some(player) = &self.player {
+                        let beat =
+                            self.file_data.current_pattern(pattern)[ch + 1][row as usize].clone();
+                        sync_player_assets(player, &self.file_data);
+                        let state = track_state_at(&self.file_data, pattern as usize, row as usize);
+                        player.preview(ch, beat, state);
                     }
                 }
                 ComponentAction::Quit => return Ok(true),
@@ -560,6 +561,14 @@ impl App {
         self.tracker_container
             .set_validation_errors(&self.validation_errors);
     }
+}
+
+fn sync_player_assets(player: &Player, file: &TrackerFile) {
+    for i in 0..NUM_INSTRUMENTS {
+        player.update_waveform(i, file.instrument_waveform(i));
+    }
+    player.update_tuning_notes(file.tuning.notes.clone());
+    player.update_envelopes((0..NUM_ENVELOPES).map(|i| file.envelope_steps(i)).collect());
 }
 
 fn edits_track(action: &ComponentAction) -> bool {

@@ -10,7 +10,8 @@ use gte_w65c02s::W65C02S;
 use indexmap::IndexMap;
 
 use crate::file::NUM_INSTRUMENTS;
-use crate::tracker::{ChannelCmd, Pattern, SequencerCmd, empty_pattern};
+use crate::track_state::{ChannelState, RowCmds, TrackState, note_freq};
+use crate::tracker::{Beat, Pattern, SequencerCmd, empty_pattern};
 use crate::tracker::{
     DEFAULT_PATTERN_BEATS, MAX_VOLUME, NUM_ENVELOPES, PATTERN_BEATS, VOLUME_LEVELS, envelope_slot,
 };
@@ -19,7 +20,7 @@ use crate::volume_scale::{SCALE_STRIDE, scale_table};
 const FIRMWARE: &[u8; 4096] =
     include_bytes!("../../../../rom-template/gametank/audiofw/wavetable.bin");
 
-const AUDIO_CHANNELS: usize = 7;
+pub const AUDIO_CHANNELS: usize = 7;
 
 const WAVETABLE: [u16; NUM_INSTRUMENTS] = [
     0x0700, 0x0800, 0x0900, 0x0A00, 0x0B00, 0x0C00, 0x0D00, 0x0E00,
@@ -63,15 +64,19 @@ fn acp_cycles_per_sample(reg: u8) -> i32 {
 }
 
 pub enum PlayerCmd {
-    Play(usize, usize),
+    Play(usize, usize, TrackState),
+    Preview(usize, Beat, TrackState),
     Pause,
-    SetBpm(u16),
-    SetFxSpeed(u8),
     UpdatePatterns(Vec<Pattern>, Vec<u8>),
     UpdateWaveform(usize, Box<[u8; 256]>),
     UpdateEnvelopes(Vec<Vec<u8>>),
     UpdateTuningNotes(IndexMap<String, f64>),
     SetChannelMuted(usize, bool),
+}
+
+struct Preview {
+    ch: usize,
+    samples_left: f64,
 }
 
 struct PlayerInner {
@@ -96,8 +101,8 @@ struct PlayerInner {
     tuning_notes: IndexMap<String, f64>,
 
     playing: bool,
+    preview: Option<Preview>,
     current_row: usize,
-    bpm: u16,
     fx_speed: u8,
     samples_per_beat: f64,
     samples_until_next_beat: f64,
@@ -179,8 +184,8 @@ impl PlayerInner {
             flow_count: 0,
             tuning_notes: IndexMap::new(),
             playing: false,
+            preview: None,
             current_row: 0,
-            bpm,
             fx_speed,
             samples_per_beat,
             samples_until_next_beat: samples_per_beat,
@@ -217,6 +222,42 @@ impl PlayerInner {
         self.samples_per_tick = self.samples_per_beat / self.fx_speed.max(1) as f64;
     }
 
+    fn set_timing(&mut self, bpm: u16, fx_speed: u8) {
+        self.samples_per_beat = self.output_sample_rate * 60.0 / (bpm.max(1) as f64);
+        self.fx_speed = fx_speed;
+        self.recompute_tick_timing();
+    }
+
+    fn silence_output(&mut self) {
+        for ch in 0..AUDIO_CHANNELS {
+            self.set_voice_volume(ch, 0);
+        }
+        self.audio_out = GameTankAudio::new(self.acp_sample_rate, self.output_sample_rate);
+        self.current_buffer = None;
+        self.buffer_position = 0;
+    }
+
+    fn start_preview(&mut self, ch: usize, beat: &Beat, state: &TrackState) {
+        self.preview = Some(Preview {
+            ch,
+            samples_left: 0.0,
+        });
+        for c in 0..AUDIO_CHANNELS {
+            self.set_voice_volume(c, 0);
+            self.arp_active[c] = false;
+            self.pitch_active[c] = false;
+            self.env_running[c] = false;
+        }
+        self.set_timing(state.bpm, state.fx_speed);
+        self.apply_channel_state(ch, &state.channels[ch]);
+        self.arp_step[ch] = 0;
+        self.trigger_channel(ch, RowCmds::from_beat(beat));
+        self.samples_until_next_tick = self.samples_per_tick.max(1.0);
+        if let Some(preview) = &mut self.preview {
+            preview.samples_left = self.samples_per_beat;
+        }
+    }
+
     fn pattern_beats(&self, pattern_idx: usize) -> usize {
         self.pattern_beats_list
             .get(pattern_idx)
@@ -228,14 +269,18 @@ impl PlayerInner {
     fn process_commands(&mut self) {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             match cmd {
-                PlayerCmd::Play(pattern_idx, row) => {
+                PlayerCmd::Play(pattern_idx, row, state) => {
+                    self.preview = None;
                     self.playing = true;
                     self.current_pattern_idx =
                         pattern_idx.min(self.patterns.len().saturating_sub(1));
                     self.current_row = row;
-                    self.flow_count = 0;
+                    self.flow_count = state.flow_count;
                     self.tick_count = 0;
-                    self.rebuild_channel_state(self.current_pattern_idx, row);
+                    self.set_timing(state.bpm, state.fx_speed);
+                    for ch in 0..AUDIO_CHANNELS {
+                        self.apply_channel_state(ch, &state.channels[ch]);
+                    }
                     for ch in 0..AUDIO_CHANNELS {
                         self.set_voice_volume(
                             ch,
@@ -255,25 +300,16 @@ impl PlayerInner {
                         .store(self.current_pattern_idx, Ordering::Relaxed);
                     self.is_playing_out.store(true, Ordering::Relaxed);
                 }
+                PlayerCmd::Preview(ch, beat, state) => {
+                    if !self.playing && ch < AUDIO_CHANNELS {
+                        self.start_preview(ch, &beat, &state);
+                    }
+                }
                 PlayerCmd::Pause => {
                     self.playing = false;
+                    self.preview = None;
                     self.is_playing_out.store(false, Ordering::Relaxed);
-                    for ch in 0..AUDIO_CHANNELS {
-                        self.set_voice_volume(ch, 0);
-                    }
-                    self.audio_out =
-                        GameTankAudio::new(self.acp_sample_rate, self.output_sample_rate);
-                    self.current_buffer = None;
-                    self.buffer_position = 0;
-                }
-                PlayerCmd::SetBpm(bpm) => {
-                    self.bpm = bpm;
-                    self.samples_per_beat = self.output_sample_rate * 60.0 / (bpm.max(1) as f64);
-                    self.recompute_tick_timing();
-                }
-                PlayerCmd::SetFxSpeed(fx_speed) => {
-                    self.fx_speed = fx_speed;
-                    self.recompute_tick_timing();
+                    self.silence_output();
                 }
                 PlayerCmd::UpdatePatterns(patterns, beats_list) => {
                     if !patterns.is_empty() {
@@ -347,7 +383,8 @@ impl PlayerInner {
 
     fn set_voice_volume(&mut self, ch: usize, volume: u8) {
         let base = voice_code(ch) + GAIN_OFFSET;
-        let level = if self.channel_muted[ch] {
+        let previewing = self.preview.as_ref().is_some_and(|p| p.ch == ch);
+        let level = if self.channel_muted[ch] && !previewing {
             0
         } else {
             volume.min(MAX_VOLUME)
@@ -426,85 +463,19 @@ impl PlayerInner {
         }
     }
 
-    fn rebuild_channel_state(&mut self, pattern_idx: usize, row: usize) {
-        let from_song_start = pattern_idx == 0 && row == 0;
-        for ch in 0..AUDIO_CHANNELS {
-            let mut vol = 0u8;
-            let mut muted = true;
-            let mut note_name: Option<String> = None;
-            let mut base_freq: u16 = 0;
-            let mut instrument = if from_song_start {
-                ch
-            } else {
-                self.current_instrument[ch]
-            };
-            let mut env_slot: Option<usize> = if from_song_start {
-                None
-            } else {
-                self.env_slot[ch]
-            };
-            let mut env_suppressed = false;
-            for r in 0..row {
-                let beat = &self.patterns[pattern_idx][ch + 1][r];
-                for cmd in &beat.cmd_list {
-                    match cmd {
-                        ChannelCmd::Volume(v) => {
-                            vol = *v;
-                            muted = false;
-                            env_suppressed = false;
-                        }
-                        ChannelCmd::NoteOff => {
-                            muted = true;
-                            env_suppressed = true;
-                        }
-                        ChannelCmd::Note(name) => {
-                            muted = false;
-                            env_suppressed = false;
-                            note_name = Some(name.clone());
-                            if let Some(&freq_hz) = self.tuning_notes.get(name.as_str()) {
-                                let freq_u32 =
-                                    ((freq_hz / self.acp_sample_rate) * 65536.0).round() as u32;
-                                base_freq = freq_u32.min(0xFFFF) as u16;
-                            }
-                        }
-                        ChannelCmd::Instrument(idx) => {
-                            instrument = *idx as usize;
-                        }
-                        ChannelCmd::Envelope(slot) => {
-                            env_slot = envelope_slot(*slot);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            self.remembered_vol[ch] = vol;
-            self.muted[ch] = muted;
-            self.cur_note_name[ch] = note_name;
-            self.base_freq[ch] = base_freq;
-            self.current_instrument[ch] = instrument;
-            self.set_voice_waveptr(ch, instrument);
-            self.arp_active[ch] = false;
-            self.pitch_active[ch] = false;
-            self.env_slot[ch] = env_slot;
-            self.env_suppressed[ch] = env_suppressed;
-            self.env_step[ch] = 0;
-            self.env_running[ch] = false;
-        }
-
-        for r in 0..row {
-            if let Some(sqc) = &self.patterns[pattern_idx][0][r].sqc {
-                match sqc {
-                    SequencerCmd::Tempo(bpm) => self.bpm = *bpm,
-                    SequencerCmd::FxSpeed(fx_speed) => self.fx_speed = *fx_speed,
-                    SequencerCmd::Stop
-                    | SequencerCmd::FlowCount(_)
-                    | SequencerCmd::CountJump(_, _) => {}
-                    SequencerCmd::Jump(_, _) => {}
-                }
-            }
-        }
-        self.samples_per_beat = self.output_sample_rate * 60.0 / (self.bpm.max(1) as f64);
-        self.recompute_tick_timing();
+    fn apply_channel_state(&mut self, ch: usize, state: &ChannelState) {
+        self.remembered_vol[ch] = state.vol;
+        self.muted[ch] = state.muted;
+        self.cur_note_name[ch] = state.note_name.clone();
+        self.base_freq[ch] = state.base_freq;
+        self.current_instrument[ch] = state.instrument;
+        self.set_voice_waveptr(ch, state.instrument);
+        self.arp_active[ch] = false;
+        self.pitch_active[ch] = false;
+        self.env_slot[ch] = state.env_slot;
+        self.env_suppressed[ch] = state.env_suppressed;
+        self.env_step[ch] = 0;
+        self.env_running[ch] = false;
     }
 
     // Process sequencer command and channel commands for the current row
@@ -524,10 +495,7 @@ impl PlayerInner {
                         return;
                     }
                     SequencerCmd::Tempo(bpm) => {
-                        self.bpm = bpm;
-                        self.samples_per_beat =
-                            self.output_sample_rate * 60.0 / (self.bpm.max(1) as f64);
-                        self.recompute_tick_timing();
+                        self.set_timing(bpm, self.fx_speed);
                     }
                     SequencerCmd::FxSpeed(fx_speed) => {
                         self.fx_speed = fx_speed;
@@ -571,144 +539,124 @@ impl PlayerInner {
 
     fn trigger_channels(&mut self, pattern_idx: usize, row: usize) {
         for ch in 0..AUDIO_CHANNELS {
-            let beat = &self.patterns[pattern_idx][ch + 1][row];
-            let maybe_note = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::Note(s) => Some(s.clone()),
-                _ => None,
-            });
-            let maybe_vol = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::Volume(v) => Some(*v),
-                _ => None,
-            });
-            let note_off = beat
-                .cmd_list
-                .iter()
-                .any(|c| matches!(c, ChannelCmd::NoteOff));
-            let maybe_arp = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::Arpeggio(x, y) => Some((*x, *y)),
-                _ => None,
-            });
-            let maybe_instrument = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::Instrument(idx) => Some(*idx as usize),
-                _ => None,
-            });
-            let maybe_pitch_up = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::PitchUp(x) => Some(*x),
-                _ => None,
-            });
-            let maybe_pitch_down = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::PitchDown(x) => Some(*x),
-                _ => None,
-            });
-            let maybe_envelope = beat.cmd_list.iter().find_map(|c| match c {
-                ChannelCmd::Envelope(x) => Some(*x),
-                _ => None,
-            });
+            let cmds = RowCmds::from_beat(&self.patterns[pattern_idx][ch + 1][row]);
+            self.trigger_channel(ch, cmds);
+        }
+    }
 
-            if let Some(idx) = maybe_instrument {
-                self.current_instrument[ch] = idx;
-                self.set_voice_waveptr(ch, idx);
-            }
+    fn trigger_channel(&mut self, ch: usize, cmds: RowCmds) {
+        let RowCmds {
+            note: maybe_note,
+            vol: maybe_vol,
+            note_off,
+            arp: maybe_arp,
+            instrument: maybe_instrument,
+            pitch_up: maybe_pitch_up,
+            pitch_down: maybe_pitch_down,
+            envelope: maybe_envelope,
+        } = cmds;
 
-            if let Some(slot) = maybe_envelope {
-                self.env_slot[ch] = envelope_slot(slot);
-            }
+        if let Some(idx) = maybe_instrument {
+            self.current_instrument[ch] = idx;
+            self.set_voice_waveptr(ch, idx);
+        }
 
-            if let Some(v) = maybe_vol {
-                self.remembered_vol[ch] = v;
-                self.muted[ch] = false;
+        if let Some(slot) = maybe_envelope {
+            self.env_slot[ch] = envelope_slot(slot);
+        }
+
+        if let Some(v) = maybe_vol {
+            self.remembered_vol[ch] = v;
+            self.muted[ch] = false;
+            self.env_suppressed[ch] = false;
+            self.set_voice_volume(ch, v);
+        } else if note_off {
+            self.muted[ch] = true;
+            self.env_suppressed[ch] = true;
+            self.set_voice_volume(ch, 0);
+        }
+
+        if let Some(note_name) = &maybe_note {
+            self.cur_note_name[ch] = Some(note_name.clone());
+            if let Some(&freq_hz) = self.tuning_notes.get(note_name.as_str()) {
+                self.base_freq[ch] = note_freq(freq_hz, self.acp_sample_rate);
                 self.env_suppressed[ch] = false;
-                self.set_voice_volume(ch, v);
-            } else if note_off {
-                self.muted[ch] = true;
-                self.env_suppressed[ch] = true;
-                self.set_voice_volume(ch, 0);
+                if maybe_vol.is_none() && self.muted[ch] {
+                    self.muted[ch] = false;
+                    self.set_voice_volume(ch, self.remembered_vol[ch]);
+                }
             }
+        }
 
-            if let Some(note_name) = &maybe_note {
-                self.cur_note_name[ch] = Some(note_name.clone());
-                if let Some(&freq_hz) = self.tuning_notes.get(note_name.as_str()) {
-                    let freq_u32 = ((freq_hz / self.acp_sample_rate) * 65536.0).round() as u32;
-                    let freq = freq_u32.min(0xFFFF) as u16;
-                    self.base_freq[ch] = freq;
-                    self.env_suppressed[ch] = false;
-                    if maybe_vol.is_none() && self.muted[ch] {
-                        self.muted[ch] = false;
-                        self.set_voice_volume(ch, self.remembered_vol[ch]);
+        if self.envelope_is_driving(ch) {
+            self.arm_envelope(ch);
+        } else {
+            self.env_running[ch] = false;
+            self.env_step[ch] = 0;
+        }
+        let vol = self.current_channel_volume(ch);
+        self.set_voice_volume(ch, vol);
+
+        if let Some((x, y)) = maybe_arp {
+            let note_name = maybe_note
+                .clone()
+                .or_else(|| self.cur_note_name[ch].clone());
+            if let Some(note_name) = &note_name {
+                self.arp_x_freq[ch] = self
+                    .arp_offset_freq(note_name, x)
+                    .unwrap_or(self.base_freq[ch]);
+                self.arp_step_count[ch] = match y {
+                    Some(y) => {
+                        self.arp_y_freq[ch] = self
+                            .arp_offset_freq(note_name, y)
+                            .unwrap_or(self.base_freq[ch]);
+                        3
                     }
-                }
-            }
-
-            if self.envelope_is_driving(ch) {
-                self.arm_envelope(ch);
-            } else {
-                self.env_running[ch] = false;
-                self.env_step[ch] = 0;
-            }
-            let vol = self.current_channel_volume(ch);
-            self.set_voice_volume(ch, vol);
-
-            if let Some((x, y)) = maybe_arp {
-                let note_name = maybe_note
-                    .clone()
-                    .or_else(|| self.cur_note_name[ch].clone());
-                if let Some(note_name) = &note_name {
-                    self.arp_x_freq[ch] = self
-                        .arp_offset_freq(note_name, x)
-                        .unwrap_or(self.base_freq[ch]);
-                    self.arp_step_count[ch] = match y {
-                        Some(y) => {
-                            self.arp_y_freq[ch] = self
-                                .arp_offset_freq(note_name, y)
-                                .unwrap_or(self.base_freq[ch]);
-                            3
-                        }
-                        None => 2,
-                    };
-                    self.arp_active[ch] = true;
-                    self.pitch_active[ch] = false;
-                } else {
-                    self.arp_active[ch] = false;
-                    self.pitch_active[ch] = false;
-                    self.set_voice_frequency(ch, self.base_freq[ch]);
-                }
-            } else if let Some(x) = maybe_pitch_up {
-                self.arp_active[ch] = false;
-                let note_name = maybe_note
-                    .clone()
-                    .or_else(|| self.cur_note_name[ch].clone());
-                if let Some(note_name) = &note_name {
-                    self.pitch_target[ch] = self
-                        .arp_offset_freq(note_name, x)
-                        .unwrap_or(self.base_freq[ch]);
-                    self.pitch_cur[ch] = self.base_freq[ch];
-                    self.pitch_active[ch] = true;
-                    self.set_voice_frequency(ch, self.pitch_cur[ch]);
-                } else {
-                    self.pitch_active[ch] = false;
-                    self.set_voice_frequency(ch, self.base_freq[ch]);
-                }
-            } else if let Some(x) = maybe_pitch_down {
-                self.arp_active[ch] = false;
-                let note_name = maybe_note
-                    .clone()
-                    .or_else(|| self.cur_note_name[ch].clone());
-                if let Some(note_name) = &note_name {
-                    self.pitch_target[ch] = self
-                        .pitch_down_offset_freq(note_name, x)
-                        .unwrap_or(self.base_freq[ch]);
-                    self.pitch_cur[ch] = self.base_freq[ch];
-                    self.pitch_active[ch] = true;
-                    self.set_voice_frequency(ch, self.pitch_cur[ch]);
-                } else {
-                    self.pitch_active[ch] = false;
-                    self.set_voice_frequency(ch, self.base_freq[ch]);
-                }
+                    None => 2,
+                };
+                self.arp_active[ch] = true;
+                self.pitch_active[ch] = false;
             } else {
                 self.arp_active[ch] = false;
                 self.pitch_active[ch] = false;
                 self.set_voice_frequency(ch, self.base_freq[ch]);
             }
+        } else if let Some(x) = maybe_pitch_up {
+            self.arp_active[ch] = false;
+            let note_name = maybe_note
+                .clone()
+                .or_else(|| self.cur_note_name[ch].clone());
+            if let Some(note_name) = &note_name {
+                self.pitch_target[ch] = self
+                    .arp_offset_freq(note_name, x)
+                    .unwrap_or(self.base_freq[ch]);
+                self.pitch_cur[ch] = self.base_freq[ch];
+                self.pitch_active[ch] = true;
+                self.set_voice_frequency(ch, self.pitch_cur[ch]);
+            } else {
+                self.pitch_active[ch] = false;
+                self.set_voice_frequency(ch, self.base_freq[ch]);
+            }
+        } else if let Some(x) = maybe_pitch_down {
+            self.arp_active[ch] = false;
+            let note_name = maybe_note
+                .clone()
+                .or_else(|| self.cur_note_name[ch].clone());
+            if let Some(note_name) = &note_name {
+                self.pitch_target[ch] = self
+                    .pitch_down_offset_freq(note_name, x)
+                    .unwrap_or(self.base_freq[ch]);
+                self.pitch_cur[ch] = self.base_freq[ch];
+                self.pitch_active[ch] = true;
+                self.set_voice_frequency(ch, self.pitch_cur[ch]);
+            } else {
+                self.pitch_active[ch] = false;
+                self.set_voice_frequency(ch, self.base_freq[ch]);
+            }
+        } else {
+            self.arp_active[ch] = false;
+            self.pitch_active[ch] = false;
+            self.set_voice_frequency(ch, self.base_freq[ch]);
         }
     }
 
@@ -716,16 +664,14 @@ impl PlayerInner {
         let idx = self.tuning_notes.get_index_of(note_name)?;
         let target_idx = (idx + steps as usize).min(self.tuning_notes.len().saturating_sub(1));
         let (_, &hz) = self.tuning_notes.get_index(target_idx)?;
-        let freq_u32 = ((hz / self.acp_sample_rate) * 65536.0).round() as u32;
-        Some(freq_u32.min(0xFFFF) as u16)
+        Some(note_freq(hz, self.acp_sample_rate))
     }
 
     fn pitch_down_offset_freq(&self, note_name: &str, steps: u8) -> Option<u16> {
         let idx = self.tuning_notes.get_index_of(note_name)?;
         let target_idx = idx.saturating_sub(steps as usize);
         let (_, &hz) = self.tuning_notes.get_index(target_idx)?;
-        let freq_u32 = ((hz / self.acp_sample_rate) * 65536.0).round() as u32;
-        Some(freq_u32.min(0xFFFF) as u16)
+        Some(note_freq(hz, self.acp_sample_rate))
     }
 
     fn advance_tick(&mut self) {
@@ -804,7 +750,7 @@ impl PlayerInner {
         self.process_commands();
 
         // Prevent buffer underrun
-        if !self.playing {
+        if !self.playing && self.preview.is_none() {
             data.fill(0.0);
             return;
         }
@@ -813,6 +759,22 @@ impl PlayerInner {
         let frame_count = data.len() / out_ch;
 
         for frame in 0..frame_count {
+            if !self.playing {
+                let finished = match &mut self.preview {
+                    Some(preview) => {
+                        preview.samples_left -= 1.0;
+                        preview.samples_left <= 0.0
+                    }
+                    None => true,
+                };
+                if finished {
+                    self.preview = None;
+                    self.silence_output();
+                    data[frame * out_ch..].fill(0.0);
+                    return;
+                }
+            }
+
             self.advance_envelopes();
 
             self.samples_until_next_tick -= 1.0;
@@ -822,7 +784,7 @@ impl PlayerInner {
             }
 
             self.samples_until_next_beat -= 1.0;
-            if self.samples_until_next_beat <= 0.0 {
+            if self.playing && self.samples_until_next_beat <= 0.0 {
                 let beats = self.pattern_beats(self.current_pattern_idx);
                 self.current_row = (self.current_row + 1) % beats.max(1);
                 self.tick_count = 0;
@@ -966,8 +928,12 @@ impl Player {
         })
     }
 
-    pub fn play(&self, pattern_idx: usize, row: usize) {
-        let _ = self.cmd_tx.send(PlayerCmd::Play(pattern_idx, row));
+    pub fn play(&self, pattern_idx: usize, row: usize, state: TrackState) {
+        let _ = self.cmd_tx.send(PlayerCmd::Play(pattern_idx, row, state));
+    }
+
+    pub fn preview(&self, ch: usize, beat: Beat, state: TrackState) {
+        let _ = self.cmd_tx.send(PlayerCmd::Preview(ch, beat, state));
     }
 
     pub fn pause(&self) {
@@ -984,14 +950,6 @@ impl Player {
 
     pub fn current_pattern(&self) -> usize {
         self.current_pattern.load(Ordering::Relaxed)
-    }
-
-    pub fn set_bpm(&self, bpm: u16) {
-        let _ = self.cmd_tx.send(PlayerCmd::SetBpm(bpm));
-    }
-
-    pub fn set_fx_speed(&self, fx_speed: u8) {
-        let _ = self.cmd_tx.send(PlayerCmd::SetFxSpeed(fx_speed));
     }
 
     pub fn update_patterns(&self, patterns: Vec<Pattern>, beats_list: Vec<u8>) {

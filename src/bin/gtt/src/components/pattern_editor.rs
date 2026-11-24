@@ -213,6 +213,7 @@ pub struct PatternEditor {
     seq_choice: ChoiceState<usize>,
     channel_muted: [bool; 7],
     edited: bool,
+    preview_note: Option<(usize, u8)>,
     validation_errors: Vec<ValidationError>,
 }
 
@@ -255,6 +256,7 @@ impl PatternEditor {
             seq_choice: ChoiceState::new(),
             channel_muted: [false; 7],
             edited: false,
+            preview_note: None,
             validation_errors: Vec::new(),
         }
     }
@@ -510,6 +512,7 @@ impl Component for PatternEditor {
     fn update(&mut self, events: Vec<Event>, file: &mut TrackerFile) -> Vec<ComponentAction> {
         self.clamp_selection(file);
         self.edited = false;
+        self.preview_note = None;
         if self.playing {
             return Vec::new();
         }
@@ -629,6 +632,7 @@ impl Component for PatternEditor {
                                         !matches!(c, ChannelCmd::Note(_) | ChannelCmd::NoteOff)
                                     });
                                     beat.cmd_list.push(ChannelCmd::Note(transposed));
+                                    self.preview_note = Some((channel, row as u8));
                                     self.sel_y = (self.sel_y + 1) % self.beats.max(1);
                                 }
                             }
@@ -969,11 +973,18 @@ impl Component for PatternEditor {
             }
         }
 
+        let mut actions = Vec::new();
         if self.edited {
-            vec![ComponentAction::PatternEdited]
-        } else {
-            Vec::new()
+            actions.push(ComponentAction::PatternEdited);
         }
+        if let Some((ch, row)) = self.preview_note {
+            actions.push(ComponentAction::PreviewNote {
+                ch,
+                pattern: self.pattern_idx,
+                row,
+            });
+        }
+        actions
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, file: &TrackerFile) {

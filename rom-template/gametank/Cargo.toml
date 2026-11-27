@@ -12,6 +12,7 @@ categories = ["embedded", "no-std", "game-development"]
 [features]
 audio-wavetable = []
 audio-fm-4ch = []
+track-sequencer = ["audio-wavetable"]
 
 [dependencies]
 volatile-register = "0.2.2"

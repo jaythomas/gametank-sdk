@@ -88,9 +88,16 @@ See `gametank/src/audio/mod.rs` and `gametank/src/audio/fm_4ch/mod.rs` for more 
 
 ### Importing gt-tracker tracks
 
-1. Follow the `gtt` instructions for creating and exporting a track
-2. Copy the exported `instruments/` folder and `<track name>.bin` into `assets/`
-3. Use `gametank::audio::TrackSequencer` in your main loop
+1. Enable the `track-sequencer` feature in Cargo.toml (this will enable the `audio-wavetable` feature implicitly):
+
+```toml
+[features]
+default = ["track-sequencer"]
+```
+
+2. Follow the `gtt` instructions for creating and exporting a track
+3. Copy the exported `instruments/` folder and `<track name>.bin` into `assets/`
+4. Use `gametank::audio::TrackSequencer` in your main loop
 
 ```rust
 use gametank::audio::{FIRMWARE, TrackSequencer};

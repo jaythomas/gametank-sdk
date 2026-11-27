@@ -11,6 +11,7 @@ edition = "2024"
 default = ["audio-wavetable"]
 audio-fm-4ch = ["gametank/audio-fm-4ch"]
 audio-wavetable = ["gametank/audio-wavetable"]
+track-sequencer = ["audio-wavetable", "gametank/track-sequencer"]
 
 [profile.release]
 strip = "none"

@@ -49,9 +49,9 @@ pub mod wavetable;
 #[cfg(feature = "audio-wavetable")]
 pub use wavetable::*;
 
-#[cfg(feature = "audio-wavetable")]
+#[cfg(feature = "track-sequencer")]
 pub mod track_sequencer;
-#[cfg(feature = "audio-wavetable")]
+#[cfg(feature = "track-sequencer")]
 pub use track_sequencer::TrackSequencer;
 
 #[cfg(feature = "audio-fm-4ch")]
